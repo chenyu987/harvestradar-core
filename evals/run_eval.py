@@ -61,19 +61,28 @@ def norm_dates(ds: list[str]) -> set[str]:
     return out
 
 
+def accepts(gold_value, pred_value, norm=lambda x: x) -> bool:
+    # A label can list several acceptable answers when the message is ambiguous.
+    options = gold_value if isinstance(gold_value, list) else [gold_value]
+    return any(norm(o) == norm(pred_value) for o in options)
+
+
 def score_one(gold: dict, pred_leads: list[dict]) -> dict:
     gold_req = {norm_name(g["sender"]): g for g in gold.get("leads", [])}
+    # "ignore": requests too cut off to label either way; neither credit nor penalty.
+    ignored = {norm_name(n) for n in gold.get("ignore", [])}
     pred_req = {}
     for p in pred_leads:
-        if p.get("kind") == "request":
-            pred_req.setdefault(norm_name(p.get("sender", "")), p)
+        k = norm_name(p.get("sender", ""))
+        if p.get("kind") == "request" and k not in ignored:
+            pred_req.setdefault(k, p)
 
     matched = sorted(gold_req.keys() & pred_req.keys())
     fields = {"item_type": [], "location": [], "dates": [], "party": []}
     for k in matched:
         g, p = gold_req[k], pred_req[k]
-        fields["item_type"].append(g.get("item_type", "unknown") == p.get("item_type"))
-        fields["location"].append(norm_location(g.get("location", "")) == norm_location(p.get("location", "")))
+        fields["item_type"].append(accepts(g.get("item_type", "unknown"), p.get("item_type")))
+        fields["location"].append(accepts(g.get("location", ""), p.get("location", ""), norm_location))
         # dates: null in the label means the request gives no exact days; skip scoring it.
         if g.get("dates") is not None:
             fields["dates"].append(norm_dates(g["dates"]) == norm_dates(p.get("dates", [])))
