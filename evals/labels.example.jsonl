@@ -1,0 +1,4 @@
+{"file": "001.png", "group": "Example Group 1", "leads": [{"sender": "群友A", "kind": "request", "item_type": "alpha", "location": "lakeside", "dates": ["03-22"], "male": 1, "female": 0}], "others": [{"sender": "Driver B", "kind": "carpool"}]}
+{"file": "002.png", "group": "Example Group 2", "leads": [], "others": [{"sender": "物主C-出女beta", "kind": "offer"}]}
+{"file": "003.png", "group": "Example Group 2", "leads": [{"sender": "User D", "kind": "request", "item_type": "beta", "location": ["riverton", "oakdale"], "dates": ["03-14", "03-15"], "male": 1, "female": 1}], "others": [], "ignore": ["名字被截断的人"]}
+{"file": "004.png", "group": "Example Group 3", "leads": [{"sender": "群友E", "kind": "request", "item_type": "unknown", "location": "hillcrest", "dates": null, "male": 0, "female": 1}], "others": []}
