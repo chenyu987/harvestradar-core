@@ -1,0 +1,20 @@
+# 复制成 collector.toml 再改（collector.toml 不进 git）。
+
+[collector]
+# 群名白名单，要和聊天软件里显示的一模一样。第一周只放 2 个。
+groups = ["某某活动群｜壹", "另一个活动群"]
+max_screens = 15          # 每个群最多往上翻几屏
+first_run_days = 3        # 第一次跑往回看几天
+scroll_clicks = 8         # 每次滚轮滚几格；两屏之间要有一点重叠，不能跳过消息
+interval_minutes = [30, 60]   # 两轮之间随机等多久
+active_hours = [9, 23]        # 只在 9:00–22:59 跑
+pause_seconds = [1.5, 4.0]    # 每次滚动后随机停多久
+group_pause_seconds = [20, 90] # 两个群之间随机停多久
+out_dir = "data/collector"    # 截图、日志、状态都在这里（不进 git）
+
+[layout]
+# 单位是 pt，从聊天软件窗口左上角量。跑 check 看 calibrate.png，框不对再改。
+sidebar_right = 340
+header_bottom = 65
+input_top_from_bottom = 160
+search_box_bottom = 70
