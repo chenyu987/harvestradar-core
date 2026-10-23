@@ -39,8 +39,9 @@ LOCATION_ALIASES = {"lks": "lakeside", "lakesidenorth": "lakeside", "hillcrestea
 
 
 def norm_name(s: str) -> str:
+    # Emoji in ChatApp names (群友🐚) are easy for a model to drop or misread; ignore them.
     s = unicodedata.normalize("NFKC", s or "")
-    return "".join(s.split()).lower()
+    return "".join(c for c in s if not c.isspace() and unicodedata.category(c) not in ("So", "Sk", "Cf")).lower()
 
 
 def norm_location(s: str) -> str:
@@ -73,7 +74,9 @@ def score_one(gold: dict, pred_leads: list[dict]) -> dict:
         g, p = gold_req[k], pred_req[k]
         fields["item_type"].append(g.get("item_type", "unknown") == p.get("item_type"))
         fields["location"].append(norm_location(g.get("location", "")) == norm_location(p.get("location", "")))
-        fields["dates"].append(norm_dates(g.get("dates", [])) == norm_dates(p.get("dates", [])))
+        # dates: null in the label means the request gives no exact days; skip scoring it.
+        if g.get("dates") is not None:
+            fields["dates"].append(norm_dates(g["dates"]) == norm_dates(p.get("dates", [])))
         fields["party"].append((g.get("male", 0), g.get("female", 0)) == (p.get("male"), p.get("female")))
 
     pred_kinds = {norm_name(p.get("sender", "")): p.get("kind") for p in pred_leads}
