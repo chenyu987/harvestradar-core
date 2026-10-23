@@ -1,18 +1,23 @@
 """Everything that touches macOS: find the ChatApp window, screenshot it, OCR it,
-and the three input actions the collector is allowed to make.
+and the mouse actions the collector is allowed to make.
 
 Allowed input, and nothing else:
-- ⌘F, ⌘A, ⌘V into ChatApp's search box (paste a group name)
-- one click on a search result
+- scroll wheel over the sidebar chat list (to find a group)
+- one click on a group's name in the sidebar chat list
 - scroll wheel over the chat pane
 
-Never Enter, never typing, never a click inside the chat pane. After a group is
-open the keyboard focus sits in the message box, so any key press from there on
-could become a message; the collector only scrolls and screenshots.
+No keyboard at all: no ⌘F, no paste, no Enter, no key of any kind. Keyboard focus
+in ChatApp is often in a chat's message box, and ChatApp does not tell other apps
+where the focus is, so any key press could land in a chat. On 2026-10-24 a ⌘F
+that did not move the focus pasted a group name into a group's message box.
+Mouse events are posted with Quartz directly; pyautogui (which can type) is not
+used, and a test checks that this file never creates a keyboard event.
 
-Needs, in System Settings → Privacy & Security, for the Terminal app you run it
-from: Screen Recording (or screenshots come back without ChatApp in them) and
-Accessibility (or clicks and scrolls are silently ignored).
+Needs, in System Settings → Privacy & Security, for the program that runs it
+(Terminal, or the Python binary when it runs as a background service): Screen
+Recording (or screenshots come back without ChatApp in them) and Accessibility
+(or clicks and scrolls are silently ignored). `python -m harvestradar.collector
+doctor` checks both.
 """
 
 import subprocess
@@ -23,7 +28,12 @@ from pathlib import Path
 from harvestradar.collector.safety import normalize
 
 BUNDLE_ID = "com.example.ChatApp"
-OWNER_NAMES = ("ChatApp", "聊天软件")
+OWNER_NAMES = ("ChatApp", "聊天软件", "ChatAppCN")
+DRAFT_MARKS = ("[draft]", "［draft］", "[草稿]", "［草稿］")
+
+
+class FailSafe(Exception):
+    """The mouse is in a screen corner: a human wants everything to stop now."""
 
 
 @dataclass
@@ -56,14 +66,16 @@ class Line:
 class Layout:
     """Where the parts of the ChatApp window are, in points from the window edges.
 
-    Defaults match ChatApp 4.x on a 1440x780 window with the default sidebar
-    width. Run `python -m harvestradar.collector check` and look at
-    calibrate.png if the boxes are off.
+    Measured from each screenshot by `detect_layout` (the thin divider lines
+    ChatApp draws between sidebar, title bar, messages and message box), so a
+    different Mac, screen or sidebar width needs no tuning. These defaults are
+    only used when detection fails; they match ChatApp 4.x on a 1440x780 window.
     """
     sidebar_right: float = 340   # chat pane starts here (x)
     header_bottom: float = 65    # chat title bar ends here (y)
     input_top_from_bottom: float = 160  # message box height, measured from the bottom
     search_box_bottom: float = 70  # search box sits above this line in the sidebar
+    sidebar_left: float = 60     # the icon bar ends here (x)
 
     def chat_pane(self, win: Window) -> tuple[float, float, float, float]:
         return (self.sidebar_right, self.header_bottom, win.w - 14, win.h - self.input_top_from_bottom)
@@ -72,7 +84,11 @@ class Layout:
         return (self.sidebar_right, 0, win.w * 0.75, self.header_bottom)
 
     def sidebar(self, win: Window) -> tuple[float, float, float, float]:
-        return (60, 0, self.sidebar_right, win.h)
+        return (self.sidebar_left, 0, self.sidebar_right, win.h)
+
+    def chat_list(self, win: Window) -> tuple[float, float, float, float]:
+        """The scrollable chat list: the sidebar below the search box."""
+        return (self.sidebar_left, self.search_box_bottom, self.sidebar_right, win.h)
 
 
 def inside(line: Line, box: tuple[float, float, float, float]) -> bool:
@@ -80,32 +96,157 @@ def inside(line: Line, box: tuple[float, float, float, float]) -> bool:
     return x0 <= line.cx <= x1 and y0 <= line.cy <= y1
 
 
-class MacBackend:
-    def __init__(self, layout: Layout, work_dir: Path):
-        import pyautogui  # macOS only; imported here so the rest is testable anywhere
+def detect_layout(img, win: Window, fallback: Layout) -> Layout | None:
+    """Find the sidebar edge, the title bar and the message box from the 1-pixel
+    divider lines ChatApp draws (same in light and dark mode). None if not found.
 
-        pyautogui.FAILSAFE = True  # slam the mouse into a screen corner to abort
-        pyautogui.PAUSE = 0.2
-        self.gui = pyautogui
+    `img` is a screenshot of exactly the window (PIL image, any scale).
+    """
+    gray = img.convert("L")
+    s = gray.width / win.w
+    px = gray.load()
+    W, H = gray.size
+
+    def median(vals: list[int]) -> float:
+        return sorted(vals)[len(vals) // 2]
+
+    def col(x: int) -> list[int]:
+        return [px[x, y] for y in range(int(H * 0.1), int(H * 0.9), 4)]
+
+    # Sidebar edge: a full-height flat column that stands out from both sides.
+    right = None
+    for x in range(int(200 * s), int(W * 0.6)):
+        vals = col(x)
+        if max(vals) - min(vals) > 2:
+            continue
+        m = median(vals)
+        if abs(median(col(x - 2)) - m) >= 6 and abs(median(col(x + 2)) - m) >= 6:
+            right = x / s
+            break
+    if right is None:
+        return None
+
+    x0, x1 = int((right + 10) * s), W - int(30 * s)
+
+    def row(y: int) -> list[int]:
+        return [px[x, y] for x in range(x0, x1, 3)]
+
+    # Title bar and message box: full-width flat rows that stand out from both sides.
+    lines = []
+    for y in range(2, H - 2):
+        vals = row(y)
+        if max(vals) - min(vals) > 2:
+            continue
+        m = median(vals)
+        if abs(median(row(y - 2)) - m) >= 6 and abs(median(row(y + 2)) - m) >= 6:
+            lines.append(y / s)
+    header = [y for y in lines if 30 <= y <= 150]
+    message_box = [y for y in lines if win.h * 0.5 <= y <= win.h - 60]
+    if not header or not message_box:
+        return None
+    header_bottom = round(min(header)) + 1
+    return Layout(
+        sidebar_right=round(right),
+        header_bottom=header_bottom,
+        input_top_from_bottom=round(win.h - max(message_box)),
+        search_box_bottom=header_bottom + 5,
+        sidebar_left=fallback.sidebar_left,
+    )
+
+
+@dataclass
+class SidebarRow:
+    name: Line
+    preview: Line | None
+
+    @property
+    def draft(self) -> bool:
+        return self.preview is not None and is_draft(self.preview.text)
+
+
+def is_draft(text: str) -> bool:
+    low = text.replace(" ", "").lower()
+    return any(m in low for m in DRAFT_MARKS)
+
+
+def sidebar_rows(lines: list[Line], layout: Layout, win: Window) -> list[SidebarRow]:
+    """The chat list, row by row: name on the first line, last message (or
+    "[Draft] ...") on the second. Both start at the same x, right of the avatar;
+    times and badges sit further right and are left out.
+    """
+    box = layout.chat_list(win)
+    cand = [l for l in lines if inside(l, box) and l.cy < win.h - 8]
+    if not cand:
+        return []
+    # Names and previews share one left edge, so it is the most common one.
+    # Unread badges (left of it) and times (right of it) have their own.
+    left = max(cand, key=lambda l: sum(abs(o.x - l.x) <= 4 for o in cand)).x
+    col = sorted((l for l in cand if abs(l.x - left) <= 8), key=lambda l: l.cy)
+    rows, i = [], 0
+    while i < len(col):
+        name = col[i]
+        nxt = col[i + 1] if i + 1 < len(col) else None
+        if nxt and 8 <= nxt.cy - name.cy <= 32:
+            rows.append(SidebarRow(name, nxt))
+            i += 2
+        else:
+            rows.append(SidebarRow(name, None))
+            i += 1
+    return rows
+
+
+
+def find_sidebar_rows(lines: list[Line], group: str, layout: Layout, win: Window) -> list[Line]:
+    """Names in the chat list that match this group.
+
+    ChatApp cuts long names with "...", so either name may be a prefix of the
+    other, with at least 4 characters in common. Only row names count, never the
+    last-message line under them. More than one match means the name is
+    ambiguous: the caller must not click.
+    """
+    want = normalize(group)
+    hits = []
+    for row in sidebar_rows(lines, layout, win):
+        got = normalize(row.name.text).rstrip("…")
+        if len(got) >= 4 and (want.startswith(got) or got.startswith(want)):
+            hits.append(row.name)
+    return hits
+
+
+class MacBackend:
+    CORNER = 5  # points; the mouse this close to a screen corner stops everything
+
+    def __init__(self, layout: Layout, work_dir: Path):
+        import Quartz  # macOS only; imported here so the rest is testable anywhere
+
+        self.q = Quartz
         self.layout = layout
         self.work_dir = work_dir
         self.work_dir.mkdir(parents=True, exist_ok=True)
-        self._last_mouse: tuple[int, int] | None = None
+        self._last_mouse: tuple[float, float] | None = None
+
+    # ---------- permissions ----------
+
+    def has_screen_recording(self) -> bool:
+        return bool(self.q.CGPreflightScreenCaptureAccess())
+
+    def has_accessibility(self, prompt: bool = False) -> bool:
+        from ApplicationServices import AXIsProcessTrustedWithOptions, kAXTrustedCheckOptionPrompt
+
+        return bool(AXIsProcessTrustedWithOptions({kAXTrustedCheckOptionPrompt: prompt}))
+
+    def request_permissions(self) -> None:
+        """Make macOS list this program in both settings panes, so the human only flips switches."""
+        self.q.CGRequestScreenCaptureAccess()
+        self.has_accessibility(prompt=True)
 
     # ---------- windows ----------
 
-    def _chat_windows(self, any_layer: bool = False) -> list[dict]:
-        from Quartz import CGWindowListCopyWindowInfo, kCGNullWindowID, kCGWindowListOptionOnScreenOnly
-
-        wins = CGWindowListCopyWindowInfo(kCGWindowListOptionOnScreenOnly, kCGNullWindowID) or []
-        return [w for w in wins if w.get("kCGWindowOwnerName") in OWNER_NAMES
-                and (any_layer or w.get("kCGWindowLayer", 1) == 0)]
-
-    def describe_windows(self) -> list[dict]:
-        """Every on-screen ChatApp window, any layer. For diag-search."""
-        return [{"id": int(w["kCGWindowNumber"]), "layer": int(w.get("kCGWindowLayer", 0)),
-                 "name": str(w.get("kCGWindowName", "")), **{k.lower(): float(v) for k, v in w["kCGWindowBounds"].items()}}
-                for w in self._chat_windows(any_layer=True)]
+    def _chat_windows(self) -> list[dict]:
+        q = self.q
+        wins = q.CGWindowListCopyWindowInfo(q.kCGWindowListOptionOnScreenOnly, q.kCGNullWindowID) or []
+        return [w for w in wins
+                if w.get("kCGWindowOwnerName") in OWNER_NAMES and w.get("kCGWindowLayer", 1) == 0]
 
     @staticmethod
     def _to_window(w: dict) -> Window:
@@ -134,9 +275,8 @@ class MacBackend:
         if win is None:
             raise RuntimeError("ChatApp window not found")
         path = self.work_dir / f"{name}.png"
-        # -R: the window's rectangle on screen, so pop-ups drawn over it (like the search
-        # results list) are in the picture too; -l <window id> would leave them out.
-        # -x: no shutter sound.
+        # -R: the window's rectangle on screen, so anything drawn over it is in the
+        # picture too (a dialog, a pop-up). -x: no shutter sound.
         rect = f"{win.x:.0f},{win.y:.0f},{win.w:.0f},{win.h:.0f}"
         subprocess.run(["screencapture", "-x", "-R", rect, str(path)], check=True)
         return path
@@ -152,53 +292,85 @@ class MacBackend:
         out.sort(key=lambda l: (round(l.y), l.x))
         return out
 
-    # ---------- input ----------
+    # ---------- mouse (the only input there is) ----------
 
-    def _set_clipboard(self, text: str) -> None:
-        subprocess.run(["pbcopy"], input=text.encode("utf-8"), check=True)
+    def _mouse(self) -> tuple[float, float]:
+        p = self.q.CGEventGetLocation(self.q.CGEventCreate(None))
+        return p.x, p.y
+
+    def _check_corner(self) -> None:
+        x, y = self._mouse()
+        b = self.q.CGDisplayBounds(self.q.CGMainDisplayID())
+        w, h = b.size.width, b.size.height
+        near = lambda v, edge: abs(v - edge) <= self.CORNER
+        if (near(x, 0) or near(x, w - 1)) and (near(y, 0) or near(y, h - 1)):
+            raise FailSafe("mouse in a screen corner")
+
+    def _post_mouse(self, kind, x: float, y: float) -> None:
+        q = self.q
+        q.CGEventPost(q.kCGHIDEventTap, q.CGEventCreateMouseEvent(None, kind, (x, y), q.kCGMouseButtonLeft))
+
+    def _move(self, x: float, y: float) -> None:
+        self._check_corner()
+        self._post_mouse(self.q.kCGEventMouseMoved, x, y)
+        time.sleep(0.15)
+
+    def _scroll(self, lines: int) -> None:
+        """Positive = content moves down (older messages come into view)."""
+        q = self.q
+        lines = int(lines)
+        step = 10 if lines > 0 else -10
+        for _ in range(abs(lines) // 10):
+            q.CGEventPost(q.kCGHIDEventTap, q.CGEventCreateScrollWheelEvent(None, q.kCGScrollEventUnitLine, 1, step))
+            time.sleep(0.02)
+        if rest := (abs(lines) % 10) * (1 if lines > 0 else -1):
+            q.CGEventPost(q.kCGHIDEventTap, q.CGEventCreateScrollWheelEvent(None, q.kCGScrollEventUnitLine, 1, rest))
 
     def _remember_mouse(self) -> None:
-        p = self.gui.position()
-        self._last_mouse = (p.x, p.y)
+        self._last_mouse = self._mouse()
 
     def user_active(self) -> bool:
         """Did someone move the mouse since our last action? Then a human is using the Mac."""
+        self._check_corner()
         if self._last_mouse is None:
             return False
-        p = self.gui.position()
-        return abs(p.x - self._last_mouse[0]) > 3 or abs(p.y - self._last_mouse[1]) > 3
+        x, y = self._mouse()
+        return abs(x - self._last_mouse[0]) > 3 or abs(y - self._last_mouse[1]) > 3
 
-    def search(self, group: str) -> None:
-        """Put the group name in ChatApp's search box. Does not press Enter."""
-        self._set_clipboard(group)
-        self.gui.hotkey("command", "f")
-        time.sleep(0.6)
-        self.gui.hotkey("command", "a")
-        self.gui.hotkey("command", "v")
-        time.sleep(1.5)
-        self._remember_mouse()
+    def idle_seconds(self) -> float:
+        """Seconds since anyone touched mouse, trackpad or keyboard."""
+        q = self.q
+        return q.CGEventSourceSecondsSinceLastEventType(q.kCGEventSourceStateHIDSystemState, q.kCGAnyInputEventType)
 
-    def nudge_search(self) -> None:
-        """Space then backspace, in case ChatApp did not start searching on a paste.
-        Leaves the text as it was, wherever the focus is."""
-        self.gui.press("space")
-        self.gui.press("backspace")
-        time.sleep(1.0)
-        self._remember_mouse()
+    def key_idle_seconds(self) -> float:
+        """Seconds since a key was pressed. The collector never presses one, so it was a human."""
+        q = self.q
+        return q.CGEventSourceSecondsSinceLastEventType(q.kCGEventSourceStateHIDSystemState, q.kCGEventKeyDown)
 
-    def escape(self) -> None:
-        """Only used by diag-search, to clear the search box afterwards."""
-        self.gui.press("escape")
+    def screen_locked(self) -> bool:
+        info = self.q.CGSessionCopyCurrentDictionary() or {}
+        return bool(info.get("CGSSessionScreenIsLocked")) or not info.get("kCGSessionOnConsoleKey", True)
 
     def click(self, win: Window, line: Line) -> None:
-        self.gui.click(win.x + line.cx, win.y + line.cy)
+        x, y = win.x + line.cx, win.y + line.cy
+        self._move(x, y)
+        self._post_mouse(self.q.kCGEventLeftMouseDown, x, y)
+        time.sleep(0.05)
+        self._post_mouse(self.q.kCGEventLeftMouseUp, x, y)
         time.sleep(0.3)
         self._remember_mouse()
 
     def scroll_up(self, win: Window, clicks: int) -> None:
         x0, y0, x1, y1 = self.layout.chat_pane(win)
-        self.gui.moveTo(win.x + (x0 + x1) / 2, win.y + (y0 + y1) / 2, duration=0.2)
-        self.gui.scroll(clicks)  # positive = up, toward older messages
+        self._move(win.x + (x0 + x1) / 2, win.y + (y0 + y1) / 2)
+        self._scroll(clicks)  # positive = up, toward older messages
+        self._remember_mouse()
+
+    def scroll_sidebar(self, win: Window, clicks: int) -> None:
+        """Scroll the chat list. Negative = down, toward older chats."""
+        x0, y0, x1, y1 = self.layout.chat_list(win)
+        self._move(win.x + (x0 + x1) / 2, win.y + (y0 + y1) / 2)
+        self._scroll(clicks)
         self._remember_mouse()
 
     def notify(self, title: str, message: str) -> None:
@@ -208,48 +380,3 @@ class MacBackend:
 
 def applescript_str(s: str) -> str:
     return '"' + s.replace("\\", "\\\\").replace('"', '\\"') + '"'
-
-
-# Section titles in ChatApp's search results pop-up. Only rows under the group-chat
-# title are real groups. The top section ("Internet search results" / 搜一搜) holds
-# search suggestions that look exactly like the group name; clicking one sends a
-# web search to ChatApp and opens a new window, so it must never be clicked.
-GROUP_SECTION = ("groupchats", "群聊")
-OTHER_SECTIONS = ("internetsearchresults", "searchresults", "搜一搜", "网络搜索", "chathistory", "聊天记录",
-                  "contacts", "联系人", "officialaccounts", "公众号", "miniprograms", "小程序",
-                  "channels", "视频号", "articles", "文章", "functions", "功能", "more", "更多")
-
-
-def find_search_result(lines: list[Line], group: str, layout: Layout, win: Window) -> Line | None:
-    """The row for this group under the 'Group Chats' / 群聊 title of the search results.
-
-    Rows outside that section never count, even when their text matches; no section
-    title on screen means no match. The pop-up can be wider than the sidebar, so a row
-    only has to start in the sidebar column.
-    """
-    want = normalize(group)
-    in_groups = False
-    for line in sorted(lines, key=lambda l: l.cy):
-        if line.cy <= layout.search_box_bottom or not (60 <= line.x < layout.sidebar_right):
-            continue
-        got = normalize(line.text).rstrip("…")
-        if got in GROUP_SECTION:
-            in_groups = True
-            continue
-        if got in OTHER_SECTIONS:
-            in_groups = False
-            continue
-        if in_groups and len(got) >= 4 and (want.startswith(got) or got.startswith(want)):
-            return line
-    return None
-
-
-def search_box_has(lines: list[Line], group: str, layout: Layout, win: Window) -> bool:
-    """Did our paste land in the search box (and not, say, in a chat's message box)?"""
-    want = normalize(group)
-    for line in lines:
-        if inside(line, layout.sidebar(win)) and line.cy <= layout.search_box_bottom:
-            got = normalize(line.text)
-            if got and (want.startswith(got[:8]) or got.startswith(want[:8])):
-                return True
-    return False

@@ -7,8 +7,8 @@ from pathlib import Path
 
 from PIL import Image, ImageDraw
 
-from harvestradar.collector.core import Collector, Config, KillSwitch
-from harvestradar.collector.mac import Layout, Line, Window, find_search_result
+from harvestradar.collector.core import Collector, Config, HumanActive, KillSwitch
+from harvestradar.collector.mac import Layout, Line, Window, detect_layout, find_sidebar_rows, sidebar_rows
 from harvestradar.collector.safety import danger_hits, title_matches
 from harvestradar.collector.timeparse import parse_divider
 
@@ -52,46 +52,69 @@ class SafetyTest(unittest.TestCase):
         self.assertFalse(title_matches(["城西活动群 (300)"], GROUP))
 
 
-class SearchResultTest(unittest.TestCase):
-    """Layout seen on the real Mac (2026-10-23), in window points."""
+class SidebarTest(unittest.TestCase):
+    """Chat list as OCR saw it on the real Mac (2026-10-24), in window points."""
     WIN = Window(1, 0, 30, 1440, 780)
+    LINES = [Line("Search", 100, 20, 60, 16), Line("68", 92, 70, 14, 12),
+             Line("工作群", 109, 80, 50, 16), Line("Remy：好的", 109, 98, 80, 16), Line("00:17", 300, 80, 30, 14),
+             Line("alpha item东区拼单", 109, 140, 120, 16), Line("［Draft］ ［Photo］", 109, 158, 120, 16),
+             Line("城东Beta Alpha互助群", 111, 200, 150, 16), Line("Ann：城东Beta Alpha互助群 欢迎", 111, 218, 200, 16),
+             Line("本地活动租物品｜壹", 109, 260, 120, 16), Line("Mia：求2女1男beta", 109, 278, 150, 16),
+             Line("城东Beta Alpha互助群", 600, 20, 150, 16)]  # chat title: not in the list
 
-    def rows(self, *extra):
-        return [Line("城东Beta Alpha互助群", 120, 30, 200, 20),   # search box
-                Line("Internet search results", 70, 50, 150, 16),
-                Line("城东 Beta Alpha 互助群", 103, 78, 200, 20),  # suggestion: must not be clicked
-                Line("城东活动群", 103, 108, 120, 20),
-                Line("Group Chats", 70, 228, 100, 16),
-                Line("城东Beta Alpha 互助群", 121, 265, 200, 20),  # the real group
-                Line("Chat History", 70, 311, 100, 16),
-                Line("［Link］城东Beta Alpha互助群…", 121, 340, 200, 20), *extra]
+    def test_rows_and_drafts(self):
+        rows = sidebar_rows(self.LINES, Layout(), self.WIN)
+        self.assertEqual([r.name.text for r in rows], ["工作群", "alpha item东区拼单", "城东Beta Alpha互助群", "本地活动租物品｜壹"])
+        self.assertEqual([r.draft for r in rows], [False, True, False, False])
 
-    def test_picks_row_under_group_chats(self):
-        hit = find_search_result(self.rows(), "城东Beta Alpha互助群", Layout(), self.WIN)
-        self.assertEqual((hit.x, hit.y), (121, 265))
+    def test_only_names_match(self):
+        hits = find_sidebar_rows(self.LINES, "城东Beta Alpha互助群", Layout(), self.WIN)
+        self.assertEqual([(h.x, h.y) for h in hits], [(111, 200)])  # not the preview line, not the title
+        self.assertEqual(len(find_sidebar_rows(self.LINES, GROUP, Layout(), self.WIN)), 1)
+        self.assertEqual(find_sidebar_rows(self.LINES, "城西活动群", Layout(), self.WIN), [])
 
-    def test_chinese_titles(self):
-        rows = [Line("搜一搜", 70, 50, 60, 16), Line("本地活动租物品｜壹", 103, 78, 200, 20),
-                Line("群聊", 70, 228, 40, 16), Line("本地活动租物品｜壹", 121, 265, 200, 20)]
-        self.assertEqual(find_search_result(rows, GROUP, Layout(), self.WIN).y, 265)
 
-    def test_no_group_section_no_click(self):
-        rows = [r for r in self.rows() if r.text != "Group Chats"]
-        self.assertIsNone(find_search_result(rows, "城东Beta Alpha互助群", Layout(), self.WIN))
-        # an ordinary chat list (no pop-up) is never clicked either
-        self.assertIsNone(find_search_result([Line(GROUP, 154, 440, 200, 20)], GROUP, Layout(), self.WIN))
+class LayoutTest(unittest.TestCase):
+    def test_detects_dividers(self):
+        # dark ChatApp at 2x: sidebar grey, 1 pt lines at x=300, y=60 and y=780-150
+        win = Window(1, 0, 0, 1200, 780)
+        img = Image.new("L", (2400, 1560), 25)
+        d = ImageDraw.Draw(img)
+        d.rectangle([0, 0, 599, 1559], fill=40)
+        d.rectangle([600, 0, 601, 1559], fill=48)
+        d.rectangle([602, 120, 2399, 121], fill=48)
+        d.rectangle([602, 1260, 2399, 1261], fill=48)
+        d.rectangle([800, 300, 1400, 340], fill=200)  # a message bubble
+        lay = detect_layout(img, win, Layout())
+        self.assertEqual((lay.sidebar_right, lay.header_bottom, lay.input_top_from_bottom), (300, 61, 150))
+        self.assertIsNone(detect_layout(Image.new("L", (2400, 1560), 25), win, Layout()))
+
+
+class NoKeyboardTest(unittest.TestCase):
+    def test_mac_backend_cannot_type(self):
+        """The collector must never send a key (see mac.py). Fail on anything that could."""
+        src = (Path(__file__).parent.parent / "harvestradar/collector/mac.py").read_text()
+        code = "\n".join(l for l in src.splitlines() if not l.lstrip().startswith("#"))
+        code = code.split('"""', 2)[2]  # skip the module docstring, which talks about keys
+        for banned in ("Keyboard", "pyautogui", "hotkey", "pbcopy", "keystroke", "key code", "typewrite",
+                       "press(", "keyDown", "keyUp", "CGEventKeyboard"):
+            self.assertNotIn(banned, code, banned)
 
 
 class FakeMac:
-    """A ChatApp with one group. `pages[i]` is the chat pane after i scrolls up."""
+    """A ChatApp whose chat list is `sidebar` (one list of names per list screen)
+    and whose open chat shows `pages[i]` after i scrolls up."""
 
-    def __init__(self, tmp: Path, pages: list[list[str]], title=GROUP + " (497)"):
+    def __init__(self, tmp: Path, pages: list[list[str]], title=GROUP + " (497)", sidebar=None):
         self.tmp, self.pages, self.title = tmp, pages, title
+        self.sidebar = sidebar or [[GROUP]]
+        self.list_pos = 0
         self.pos = 0
-        self.results_after = 0  # search results show up on this capture of the search screen
-        self.search_looks = 0
         self.win = Window(1, 0, 25, 1440, 780)
+        self.layout = Layout()
         self.extra = 0
+        self.idle = 3600.0
+        self.draft_after_click = None  # a chat that shows "[Draft]" once something was clicked
         self.actions = []
         self.clicks = []
 
@@ -99,6 +122,9 @@ class FakeMac:
     def window(self): return self.win
     def extra_windows(self): return self.extra
     def user_active(self): return False
+    def idle_seconds(self): return self.idle
+    def key_idle_seconds(self): return self.idle
+    def screen_locked(self): return False
     def notify(self, *a): self.actions.append(("notify",) + a)
 
     def capture(self, name):
@@ -112,16 +138,20 @@ class FakeMac:
     def ocr(self, path, win):
         page = self.pages[min(self.pos, len(self.pages) - 1)]
         lines = [Line(self.title, 360, 20, 300, 20)]
-        if path.stem.startswith("search"):
-            lines += [Line(GROUP, 120, 30, 200, 20)]
-            if self.search_looks >= self.results_after:
-                lines += [Line("Group Chats", 120, 90, 100, 16), Line(GROUP, 160, 120, 200, 20)]
-            self.search_looks += 1
+        for i, name in enumerate(self.sidebar[min(self.list_pos, len(self.sidebar) - 1)]):
+            clicked = any(a[0] == "click" for a in self.actions)
+            preview = "[Draft] hi" if clicked and name == self.draft_after_click else "someone: hello"
+            lines += [Line(name, 110, 90 + 60 * i, 150, 16), Line(preview, 110, 108 + 60 * i, 150, 16)]
         return lines + [Line(t, 600, 100 + 40 * i, 200, 20) for i, t in enumerate(page)]
 
-    def search(self, group): self.actions.append(("search", group))
-    def nudge_search(self): self.actions.append(("nudge",))
-    def click(self, win, line): self.actions.append(("click", line.text))
+    def click(self, win, line):
+        self.actions.append(("click", line.text))
+        self.pos = 0
+
+    def scroll_sidebar(self, win, clicks):
+        self.actions.append(("list", clicks))
+        self.list_pos = 0 if clicks > 0 else self.list_pos + 1
+
     def scroll_up(self, win, clicks):
         self.actions.append(("scroll",))
         self.clicks.append(clicks)
@@ -139,7 +169,7 @@ class CollectorTest(unittest.TestCase):
     def test_stops_at_checkpoint_and_saves_state(self):
         pages = [["14:30", "求一张 beta"], ["13:00", "出货"], ["Yesterday 10:02", "hi"], ["1/20 09:00"]]
         mac = FakeMac(self.tmp, pages)
-        r = self.collector(mac).scan_group(GROUP)
+        [r] = self.collector(mac).round()
         # first run looks back 3 days (to 1/25 15:00): page 3 has 1/20, so it stops there
         self.assertEqual((r.stop, len(r.screens)), ("checkpoint", 4))
         self.assertEqual(r.newest, "2026-01-28T14:30:00")
@@ -148,55 +178,96 @@ class CollectorTest(unittest.TestCase):
         self.assertTrue(all(Path(s.file).exists() for s in r.screens))
 
         # next round, nothing new: same first screen, so nothing is saved
-        r2 = self.collector(FakeMac(self.tmp, pages)).scan_group(GROUP)
+        [r2] = self.collector(FakeMac(self.tmp, pages)).round()
         self.assertEqual((r2.stop, len(r2.screens)), ("no_new", 0))
 
-    def test_waits_for_search_results(self):
-        mac = FakeMac(self.tmp, [["14:30"], ["13:00"]])
-        mac.results_after = 3  # results only on the 4th look, after a nudge
-        self.collector(mac).scan_group(GROUP)
-        self.assertIn(("nudge",), mac.actions)
-        self.assertIn(("click", GROUP), mac.actions)
+    def test_finds_groups_down_the_chat_list(self):
+        self.cfg.groups = [GROUP, "城西活动群", "没有新消息的群"]
+        sidebar = [["工作群", "Remy"], ["城西活动群", "Lucas"], [GROUP, "闲聊群"], [GROUP, "闲聊群"]]
+        mac = FakeMac(self.tmp, [["14:30"], ["13:00"]], sidebar=sidebar)
+        mac.title = "城西活动群 (80)"
+        col = self.collector(mac)
+        # the title must follow the click
+        orig = mac.click
+        def click(win, line):
+            orig(win, line)
+            mac.title = line.text + " (80)"
+        mac.click = click
+        results = col.round()
+        self.assertEqual(sorted(r.group for r in results), sorted([GROUP, "城西活动群"]))
+        self.assertEqual([a[1] for a in mac.actions if a[0] == "click"], ["城西活动群", GROUP])
+        log = (self.tmp / "out" / "log.jsonl").read_text()
+        self.assertIn('"not_in_recent", "group": "没有新消息的群"', log)
 
+    def test_run_stops_on_stop_file(self):
+        mac = FakeMac(self.tmp, [["14:30"], ["13:00"]])
+        col = self.collector(mac)
+        col.sleep = lambda s: col.stop_file.write_text("stopped by hand\n")  # someone runs `stop` while it waits
+        col.run(hours=1)
+        log = (self.tmp / "out" / "log.jsonl").read_text()
+        self.assertIn('"stopped"', log)
+        self.assertNotIn("KILL", log)  # a stop by hand is not a kill switch
+        self.assertEqual(col.stop_file.read_text(), "stopped by hand\n")
+
+    def test_waits_for_nobody_at_the_mac(self):
         mac = FakeMac(self.tmp, [["14:30"]])
-        mac.results_after = 99
-        with self.assertRaises(LookupError):
-            self.collector(mac).scan_group("本地活动租物品｜壹")
+        mac.idle = 30
+        with self.assertRaises(HumanActive):
+            self.collector(mac).round()
+        self.assertEqual(mac.actions, [])  # ChatApp was not even brought to the front
+
+    def test_ambiguous_name_is_not_clicked(self):
+        mac = FakeMac(self.tmp, [["14:30"]], sidebar=[[GROUP, GROUP + "二群"]])
+        self.assertEqual(self.collector(mac).round(), [])
+        self.assertFalse([a for a in mac.actions if a[0] == "click"])
+
+    def test_kill_on_new_draft(self):
+        mac = FakeMac(self.tmp, [["14:30"], ["13:00"]], sidebar=[[GROUP, "工作群"]])
+        mac.draft_after_click = "工作群"
+        with self.assertRaises(KillSwitch):
+            self.collector(mac).round()
+
+    def test_old_draft_is_only_logged(self):
+        mac = FakeMac(self.tmp, [["14:30"], ["13:00"]], sidebar=[[GROUP, "工作群"]])
+        mac.draft_after_click = "工作群"
+        mac.actions.append(("click", "earlier"))  # draft already there when the run starts
+        self.assertEqual(len(self.collector(mac).round()), 1)
+        self.assertIn("draft_present", (self.tmp / "out" / "log.jsonl").read_text())
 
     def test_scroll_grows_when_screens_overlap(self):
         pages = [["14:30", "aaaa", "bbbb"], ["14:00", "aaaa", "bbbb"], ["13:00", "cccc", "aaaa"],
                  ["12:00", "dddd", "eeee"], ["11:00"]]
         mac = FakeMac(self.tmp, pages)
-        self.collector(mac).scan_group(GROUP)
+        self.collector(mac).round()
         # page 1 shares 2/3 with page 0 -> bigger; page 2 shares 1/3 -> same; page 3 shares none -> smaller
         self.assertEqual(mac.clicks, [30, 46, 46, 27])
 
     def test_stops_when_screen_stops_changing(self):
-        r = self.collector(FakeMac(self.tmp, [["14:30"], ["13:00"]])).scan_group(GROUP)
+        [r] = self.collector(FakeMac(self.tmp, [["14:30"], ["13:00"]])).round()
         self.assertEqual((r.stop, len(r.screens)), ("unchanged", 2))
 
     def test_max_screens(self):
-        r = self.collector(FakeMac(self.tmp, [["14:30"]] + [[f"{12 - i}:00"] for i in range(9)])).scan_group(GROUP)
+        [r] = self.collector(FakeMac(self.tmp, [["14:30"]] + [[f"{12 - i}:00"] for i in range(9)])).round()
         self.assertEqual((r.stop, len(r.screens)), ("max_screens", 5))
 
     def test_kill_on_danger_words(self):
         with self.assertRaises(KillSwitch):
-            self.collector(FakeMac(self.tmp, [["14:30"], ["你的账号功能受限"]])).scan_group(GROUP)
+            self.collector(FakeMac(self.tmp, [["14:30"], ["你的账号功能受限"]])).round()
 
     def test_kill_on_wrong_chat(self):
         with self.assertRaises(KillSwitch):
-            self.collector(FakeMac(self.tmp, [["14:30"]], title="Rina")).scan_group(GROUP)
+            self.collector(FakeMac(self.tmp, [["14:30"]], title="Rina")).round()
 
     def test_kill_on_dialog_and_stop_file(self):
         mac = FakeMac(self.tmp, [["14:30"]])
         mac.extra = 1
         col = self.collector(mac)
         with self.assertRaises(KillSwitch):
-            col.scan_group(GROUP)
+            col.round()
         col.kill("test")
         self.assertTrue(col.stop_file.exists())
         with self.assertRaises(KillSwitch):
-            self.collector(FakeMac(self.tmp, [["14:30"]])).scan_group(GROUP)
+            self.collector(FakeMac(self.tmp, [["14:30"]])).round()
 
 
 if __name__ == "__main__":
