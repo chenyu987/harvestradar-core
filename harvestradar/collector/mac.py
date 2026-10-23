@@ -94,12 +94,18 @@ class MacBackend:
 
     # ---------- windows ----------
 
-    def _chat_windows(self) -> list[dict]:
+    def _chat_windows(self, any_layer: bool = False) -> list[dict]:
         from Quartz import CGWindowListCopyWindowInfo, kCGNullWindowID, kCGWindowListOptionOnScreenOnly
 
         wins = CGWindowListCopyWindowInfo(kCGWindowListOptionOnScreenOnly, kCGNullWindowID) or []
-        return [w for w in wins
-                if w.get("kCGWindowOwnerName") in OWNER_NAMES and w.get("kCGWindowLayer", 1) == 0]
+        return [w for w in wins if w.get("kCGWindowOwnerName") in OWNER_NAMES
+                and (any_layer or w.get("kCGWindowLayer", 1) == 0)]
+
+    def describe_windows(self) -> list[dict]:
+        """Every on-screen ChatApp window, any layer. For diag-search."""
+        return [{"id": int(w["kCGWindowNumber"]), "layer": int(w.get("kCGWindowLayer", 0)),
+                 "name": str(w.get("kCGWindowName", "")), **{k.lower(): float(v) for k, v in w["kCGWindowBounds"].items()}}
+                for w in self._chat_windows(any_layer=True)]
 
     @staticmethod
     def _to_window(w: dict) -> Window:
@@ -128,8 +134,11 @@ class MacBackend:
         if win is None:
             raise RuntimeError("ChatApp window not found")
         path = self.work_dir / f"{name}.png"
-        # -l: just this window, -o: no shadow, -x: no shutter sound
-        subprocess.run(["screencapture", "-x", "-o", "-l", str(win.id), str(path)], check=True)
+        # -R: the window's rectangle on screen, so pop-ups drawn over it (like the search
+        # results list) are in the picture too; -l <window id> would leave them out.
+        # -x: no shutter sound.
+        rect = f"{win.x:.0f},{win.y:.0f},{win.w:.0f},{win.h:.0f}"
+        subprocess.run(["screencapture", "-x", "-R", rect, str(path)], check=True)
         return path
 
     def ocr(self, path: Path, win: Window) -> list[Line]:
@@ -169,6 +178,18 @@ class MacBackend:
         time.sleep(1.5)
         self._remember_mouse()
 
+    def nudge_search(self) -> None:
+        """Space then backspace, in case ChatApp did not start searching on a paste.
+        Leaves the text as it was, wherever the focus is."""
+        self.gui.press("space")
+        self.gui.press("backspace")
+        time.sleep(1.0)
+        self._remember_mouse()
+
+    def escape(self) -> None:
+        """Only used by diag-search, to clear the search box afterwards."""
+        self.gui.press("escape")
+
     def click(self, win: Window, line: Line) -> None:
         self.gui.click(win.x + line.cx, win.y + line.cy)
         time.sleep(0.3)
@@ -190,10 +211,11 @@ def applescript_str(s: str) -> str:
 
 
 def find_search_result(lines: list[Line], group: str, layout: Layout, win: Window) -> Line | None:
-    """The search result row for this group: in the sidebar, below the search box, name matches."""
+    """The search result row for this group: below the search box, starting in the sidebar
+    column (a results pop-up may be wider than the sidebar), name matches."""
     want = normalize(group)
     for line in lines:
-        if not inside(line, layout.sidebar(win)) or line.cy <= layout.search_box_bottom:
+        if not (60 <= line.x < layout.sidebar_right) or line.cy <= layout.search_box_bottom:
             continue
         got = normalize(line.text).rstrip("…")
         if len(got) >= 4 and (want.startswith(got) or got.startswith(want)):

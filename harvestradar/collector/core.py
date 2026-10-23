@@ -34,7 +34,7 @@ from pathlib import Path
 from PIL import Image
 
 from harvestradar.collector.mac import Layout, Line, Window, find_search_result, inside, search_box_has
-from harvestradar.collector.safety import danger_hits, title_matches
+from harvestradar.collector.safety import danger_hits, normalize, title_matches
 from harvestradar.collector.timeparse import parse_divider
 
 COLLECTOR_VERSION = "v1"
@@ -53,7 +53,7 @@ class Config:
     groups: list[str] = field(default_factory=list)
     max_screens: int = 15
     first_run_days: int = 3
-    scroll_clicks: int = 8
+    scroll_clicks: int = 30  # starting value; adjusted per group from how much screens overlap
     interval_minutes: tuple[float, float] = (30, 60)
     active_hours: tuple[int, int] = (9, 23)  # run only from 09:00 to 22:59
     pause_seconds: tuple[float, float] = (1.5, 4.0)  # between scrolls
@@ -144,7 +144,7 @@ class Collector:
 
     # ---------- checks ----------
 
-    def look(self, name: str) -> tuple[Window, Path, list[Line]]:
+    def look(self, name: str, allow_extra: bool = False) -> tuple[Window, Path, list[Line]]:
         """Screenshot + OCR the ChatApp window, and run every safety check on it."""
         if self.stop_file.exists():
             raise KillSwitch("STOP file present")
@@ -155,7 +155,7 @@ class Collector:
             raise KillSwitch("ChatApp window not found (logged out or quit?)")
         if win.w < 700 or win.h < 450:
             raise KillSwitch(f"ChatApp window is {win.w:.0f}x{win.h:.0f}, looks like a login window")
-        if n := self.mac.extra_windows():
+        if not allow_extra and (n := self.mac.extra_windows()):
             raise KillSwitch(f"{n} extra ChatApp window(s) open (dialog?)")
         full = self.mac.capture(name)
         lines = self.mac.ocr(full, win)
@@ -175,12 +175,21 @@ class Collector:
     def open_group(self, group: str) -> None:
         self.mac.activate()
         self.mac.search(group)
-        win, _, lines = self.look("search")
-        if not search_box_has(lines, group, self.cfg.layout, win):
-            # The paste went somewhere else, maybe a chat's message box. Nothing was sent
-            # (we never press Enter), but a human should check for a leftover draft.
-            raise KillSwitch(f"group name did not appear in the search box: {group}")
-        hit = find_search_result(lines, group, self.cfg.layout, win)
+        # Search results take a moment, and may be a pop-up window of their own,
+        # so allow extra windows here and poll for a few seconds.
+        hit = None
+        for attempt in range(4):
+            win, _, lines = self.look(f"search{attempt}", allow_extra=True)
+            if not search_box_has(lines, group, self.cfg.layout, win):
+                # The paste went somewhere else, maybe a chat's message box. Nothing was sent
+                # (we never press Enter), but a human should check for a leftover draft.
+                raise KillSwitch(f"group name did not appear in the search box: {group}")
+            if hit := find_search_result(lines, group, self.cfg.layout, win):
+                break
+            if attempt == 1:
+                self.mac.nudge_search()
+            else:
+                self.sleep(1.0)
         if hit is None:
             self.log("group_not_found", group=group)
             raise LookupError(group)
@@ -200,6 +209,8 @@ class Collector:
         screens: list[ScreenInfo] = []
         newest: datetime | None = None
         prev_key = None
+        prev_lines: set[str] = set()
+        clicks = self.cfg.scroll_clicks
         stop = "max_screens"
 
         for i in range(self.cfg.max_screens):
@@ -217,6 +228,19 @@ class Collector:
                 first_key = key
             prev_key = key
 
+            # Two screens in a row should share a few lines. None shared means the
+            # scroll may have jumped past messages; mostly shared means it barely moved.
+            cur_lines = {t for l in pane if len(t := normalize(l.text)) >= 4}
+            if i > 0 and cur_lines:
+                shared = len(cur_lines & prev_lines) / len(cur_lines)
+                if shared == 0:
+                    self.log("no_overlap", group=group, screen=i, clicks=clicks,
+                             note="may have skipped messages; scrolling less from here")
+                    clicks = max(3, int(clicks * 0.6))
+                elif shared > 0.6:
+                    clicks = min(150, int(clicks * 1.5) + 1)
+            prev_lines = cur_lines
+
             dest = day_dir / f"{stamp}_{slug(group)}_{i:02d}.png"
             crop_chat(full, win, self.cfg.layout, dest)
             dividers = [d for l in pane if (d := parse_divider(l.text, now)) and d <= now + timedelta(minutes=5)]
@@ -228,7 +252,7 @@ class Collector:
                 stop = "checkpoint"
                 break
             if i + 1 < self.cfg.max_screens:
-                self.mac.scroll_up(win, self.cfg.scroll_clicks)
+                self.mac.scroll_up(win, clicks)
                 self.sleep(self.rand.uniform(*self.cfg.pause_seconds))
 
         if stop == "max_screens":
@@ -240,7 +264,7 @@ class Collector:
                     f.write(json.dumps({**asdict(s), "collector_version": COLLECTOR_VERSION}, ensure_ascii=False) + "\n")
             self.state[group] = {"checkpoint": (newest or checkpoint).isoformat(), "first_key": first_key}
             self.save_state()
-        self.log("group_done", group=group, screens=len(screens), stop=stop,
+        self.log("group_done", group=group, screens=len(screens), stop=stop, last_clicks=clicks,
                  newest=newest.isoformat() if newest else None)
         return GroupResult(group, screens, stop, newest.isoformat() if newest else None)
 

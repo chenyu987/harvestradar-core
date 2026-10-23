@@ -5,7 +5,7 @@
 groups = ["某某活动群｜壹", "另一个活动群"]
 max_screens = 15          # 每个群最多往上翻几屏
 first_run_days = 3        # 第一次跑往回看几天
-scroll_clicks = 8         # 每次滚轮滚几格；两屏之间要有一点重叠，不能跳过消息
+scroll_clicks = 30        # 每次滚轮滚几格（起始值）。两屏重叠太多会自动加大，完全不重叠会自动减小并在日志记 no_overlap
 interval_minutes = [30, 60]   # 两轮之间随机等多久
 active_hours = [9, 23]        # 只在 9:00–22:59 跑
 pause_seconds = [1.5, 4.0]    # 每次滚动后随机停多久

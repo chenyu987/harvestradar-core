@@ -2,6 +2,7 @@
 
     python -m harvestradar.collector check                       # no input at all: screenshot, OCR, draw the layout boxes
     python -m harvestradar.collector scan-current --group 群名   # scroll the chat that is already open, no search, no click
+    python -m harvestradar.collector diag-search --group 群名    # ⌘F + paste, screenshots over 5 s, list windows, Esc. No Enter, no click
     python -m harvestradar.collector once                        # one round over every group in collector.toml
     python -m harvestradar.collector run                         # rounds every 30-60 min, daytime only, until STOP
     python -m harvestradar.collector stop | resume               # create / delete the STOP file
@@ -51,6 +52,27 @@ def cmd_check(cfg: Config, mac) -> None:
           "\n框不对就改 collector.toml 的 [layout]。")
 
 
+def cmd_diag_search(cfg: Config, mac, group: str) -> None:
+    """Find out how ChatApp shows search results: how fast, and in which window."""
+    import subprocess
+    import time
+
+    out = Path(cfg.out_dir) / "diag"
+    out.mkdir(parents=True, exist_ok=True)
+    mac.activate()
+    print("搜索前的聊天软件窗口:", json.dumps(mac.describe_windows(), ensure_ascii=False))
+    mac.search(group)  # ends 1.5 s after the paste
+    t0 = time.monotonic()
+    for label in ("1.5s", "3s", "5s"):
+        while time.monotonic() - t0 < {"1.5s": 0, "3s": 1.5, "5s": 3.5}[label]:
+            time.sleep(0.1)
+        # Whole screen, so a results pop-up anywhere is in the picture.
+        subprocess.run(["screencapture", "-x", str(out / f"search_{label}.png")], check=True)
+        print(f"{label} 的聊天软件窗口:", json.dumps(mac.describe_windows(), ensure_ascii=False))
+    mac.escape()
+    print(f"\n截图在 {out}/search_1.5s.png、search_3s.png、search_5s.png，连同上面的窗口列表发给我。已按 Esc 清掉搜索。")
+
+
 def main() -> None:
     ap = argparse.ArgumentParser(prog="python -m harvestradar.collector")
     ap.add_argument("--config", default="collector.toml")
@@ -58,6 +80,8 @@ def main() -> None:
     sub.add_parser("check")
     sc = sub.add_parser("scan-current")
     sc.add_argument("--group", required=True, help="the chat that is open right now (checked against the title bar)")
+    ds = sub.add_parser("diag-search")
+    ds.add_argument("--group", required=True)
     sub.add_parser("once")
     sub.add_parser("run")
     sub.add_parser("stop")
@@ -80,6 +104,8 @@ def main() -> None:
     mac = MacBackend(cfg.layout, Path(cfg.out_dir) / "tmp")
     if args.cmd == "check":
         return cmd_check(cfg, mac)
+    if args.cmd == "diag-search":
+        return cmd_diag_search(cfg, mac, args.group)
 
     col = Collector(cfg, mac)
     if args.cmd == "run":

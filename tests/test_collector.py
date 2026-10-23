@@ -58,9 +58,12 @@ class FakeMac:
     def __init__(self, tmp: Path, pages: list[list[str]], title=GROUP + " (497)"):
         self.tmp, self.pages, self.title = tmp, pages, title
         self.pos = 0
+        self.results_after = 0  # search results show up on this capture of the search screen
+        self.search_looks = 0
         self.win = Window(1, 0, 25, 1440, 780)
         self.extra = 0
         self.actions = []
+        self.clicks = []
 
     def activate(self): pass
     def window(self): return self.win
@@ -79,14 +82,19 @@ class FakeMac:
     def ocr(self, path, win):
         page = self.pages[min(self.pos, len(self.pages) - 1)]
         lines = [Line(self.title, 360, 20, 300, 20)]
-        if path.stem == "search":
-            lines += [Line(GROUP, 120, 30, 200, 20), Line("Group Chats", 120, 90, 100, 16), Line(GROUP, 160, 120, 200, 20)]
+        if path.stem.startswith("search"):
+            lines += [Line(GROUP, 120, 30, 200, 20)]
+            if self.search_looks >= self.results_after:
+                lines += [Line("Group Chats", 120, 90, 100, 16), Line(GROUP, 160, 120, 200, 20)]
+            self.search_looks += 1
         return lines + [Line(t, 600, 100 + 40 * i, 200, 20) for i, t in enumerate(page)]
 
     def search(self, group): self.actions.append(("search", group))
+    def nudge_search(self): self.actions.append(("nudge",))
     def click(self, win, line): self.actions.append(("click", line.text))
     def scroll_up(self, win, clicks):
         self.actions.append(("scroll",))
+        self.clicks.append(clicks)
         self.pos += 1
 
 
@@ -112,6 +120,26 @@ class CollectorTest(unittest.TestCase):
         # next round, nothing new: same first screen, so nothing is saved
         r2 = self.collector(FakeMac(self.tmp, pages)).scan_group(GROUP)
         self.assertEqual((r2.stop, len(r2.screens)), ("no_new", 0))
+
+    def test_waits_for_search_results(self):
+        mac = FakeMac(self.tmp, [["14:30"], ["13:00"]])
+        mac.results_after = 3  # results only on the 4th look, after a nudge
+        self.collector(mac).scan_group(GROUP)
+        self.assertIn(("nudge",), mac.actions)
+        self.assertIn(("click", GROUP), mac.actions)
+
+        mac = FakeMac(self.tmp, [["14:30"]])
+        mac.results_after = 99
+        with self.assertRaises(LookupError):
+            self.collector(mac).scan_group("本地活动租物品｜壹")
+
+    def test_scroll_grows_when_screens_overlap(self):
+        pages = [["14:30", "aaaa", "bbbb"], ["14:00", "aaaa", "bbbb"], ["13:00", "cccc", "aaaa"],
+                 ["12:00", "dddd", "eeee"], ["11:00"]]
+        mac = FakeMac(self.tmp, pages)
+        self.collector(mac).scan_group(GROUP)
+        # page 1 shares 2/3 with page 0 -> bigger; page 2 shares 1/3 -> same; page 3 shares none -> smaller
+        self.assertEqual(mac.clicks, [30, 46, 46, 27])
 
     def test_stops_when_screen_stops_changing(self):
         r = self.collector(FakeMac(self.tmp, [["14:30"], ["13:00"]])).scan_group(GROUP)
