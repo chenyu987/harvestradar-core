@@ -8,7 +8,7 @@ from pathlib import Path
 from PIL import Image, ImageDraw
 
 from harvestradar.collector.core import Collector, Config, KillSwitch
-from harvestradar.collector.mac import Layout, Line, Window
+from harvestradar.collector.mac import Layout, Line, Window, find_search_result
 from harvestradar.collector.safety import danger_hits, title_matches
 from harvestradar.collector.timeparse import parse_divider
 
@@ -50,6 +50,36 @@ class SafetyTest(unittest.TestCase):
         self.assertTrue(title_matches(["本地活动租物品 | 壹(497)"], GROUP))
         self.assertTrue(title_matches(["本地活动租..."], GROUP))
         self.assertFalse(title_matches(["城西活动群 (300)"], GROUP))
+
+
+class SearchResultTest(unittest.TestCase):
+    """Layout seen on the real Mac (2026-10-23), in window points."""
+    WIN = Window(1, 0, 30, 1440, 780)
+
+    def rows(self, *extra):
+        return [Line("城东Beta Alpha互助群", 120, 30, 200, 20),   # search box
+                Line("Internet search results", 70, 50, 150, 16),
+                Line("城东 Beta Alpha 互助群", 103, 78, 200, 20),  # suggestion: must not be clicked
+                Line("城东活动群", 103, 108, 120, 20),
+                Line("Group Chats", 70, 228, 100, 16),
+                Line("城东Beta Alpha 互助群", 121, 265, 200, 20),  # the real group
+                Line("Chat History", 70, 311, 100, 16),
+                Line("［Link］城东Beta Alpha互助群…", 121, 340, 200, 20), *extra]
+
+    def test_picks_row_under_group_chats(self):
+        hit = find_search_result(self.rows(), "城东Beta Alpha互助群", Layout(), self.WIN)
+        self.assertEqual((hit.x, hit.y), (121, 265))
+
+    def test_chinese_titles(self):
+        rows = [Line("搜一搜", 70, 50, 60, 16), Line("本地活动租物品｜壹", 103, 78, 200, 20),
+                Line("群聊", 70, 228, 40, 16), Line("本地活动租物品｜壹", 121, 265, 200, 20)]
+        self.assertEqual(find_search_result(rows, GROUP, Layout(), self.WIN).y, 265)
+
+    def test_no_group_section_no_click(self):
+        rows = [r for r in self.rows() if r.text != "Group Chats"]
+        self.assertIsNone(find_search_result(rows, "城东Beta Alpha互助群", Layout(), self.WIN))
+        # an ordinary chat list (no pop-up) is never clicked either
+        self.assertIsNone(find_search_result([Line(GROUP, 154, 440, 200, 20)], GROUP, Layout(), self.WIN))
 
 
 class FakeMac:

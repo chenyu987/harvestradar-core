@@ -210,15 +210,36 @@ def applescript_str(s: str) -> str:
     return '"' + s.replace("\\", "\\\\").replace('"', '\\"') + '"'
 
 
+# Section titles in ChatApp's search results pop-up. Only rows under the group-chat
+# title are real groups. The top section ("Internet search results" / 搜一搜) holds
+# search suggestions that look exactly like the group name; clicking one sends a
+# web search to ChatApp and opens a new window, so it must never be clicked.
+GROUP_SECTION = ("groupchats", "群聊")
+OTHER_SECTIONS = ("internetsearchresults", "searchresults", "搜一搜", "网络搜索", "chathistory", "聊天记录",
+                  "contacts", "联系人", "officialaccounts", "公众号", "miniprograms", "小程序",
+                  "channels", "视频号", "articles", "文章", "functions", "功能", "more", "更多")
+
+
 def find_search_result(lines: list[Line], group: str, layout: Layout, win: Window) -> Line | None:
-    """The search result row for this group: below the search box, starting in the sidebar
-    column (a results pop-up may be wider than the sidebar), name matches."""
+    """The row for this group under the 'Group Chats' / 群聊 title of the search results.
+
+    Rows outside that section never count, even when their text matches; no section
+    title on screen means no match. The pop-up can be wider than the sidebar, so a row
+    only has to start in the sidebar column.
+    """
     want = normalize(group)
-    for line in lines:
-        if not (60 <= line.x < layout.sidebar_right) or line.cy <= layout.search_box_bottom:
+    in_groups = False
+    for line in sorted(lines, key=lambda l: l.cy):
+        if line.cy <= layout.search_box_bottom or not (60 <= line.x < layout.sidebar_right):
             continue
         got = normalize(line.text).rstrip("…")
-        if len(got) >= 4 and (want.startswith(got) or got.startswith(want)):
+        if got in GROUP_SECTION:
+            in_groups = True
+            continue
+        if got in OTHER_SECTIONS:
+            in_groups = False
+            continue
+        if in_groups and len(got) >= 4 and (want.startswith(got) or got.startswith(want)):
             return line
     return None
 
