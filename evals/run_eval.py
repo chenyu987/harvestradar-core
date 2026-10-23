@@ -130,19 +130,38 @@ def main() -> None:
     else:
         client = anthropic.Anthropic()
 
+    # Successful extractions are cached per model + prompt version, so a run cut short by
+    # rate limits can be resumed later without paying for the same screenshots again.
+    cache = Path(args.out) / "cache" / f"{args.model}_{PROMPT_VERSION}"
+    cache.mkdir(parents=True, exist_ok=True)
+    quota_hit = False
+
     def run(gold: dict) -> dict:
-        t0 = time.monotonic()
-        res = extract_leads(data / "screenshots" / gold["file"], model=args.model, client=client)
-        return {
-            "file": gold["file"],
-            "seconds": round(time.monotonic() - t0, 2),
-            "input_tokens": res.input_tokens,
-            "output_tokens": res.output_tokens,
-            "refused": res.refused,
-            "error": res.error,
-            "pred": res.leads,
-            "score": score_one(gold, res.leads),
-        }
+        nonlocal quota_hit
+        cached = cache / f"{gold['file']}.json"
+        if cached.exists():
+            row = json.loads(cached.read_text())
+        elif quota_hit:
+            row = {"file": gold["file"], "seconds": 0, "input_tokens": 0, "output_tokens": 0,
+                   "refused": False, "error": "daily_quota", "pred": []}
+        else:
+            t0 = time.monotonic()
+            res = extract_leads(data / "screenshots" / gold["file"], model=args.model, client=client)
+            print(f"  {gold['file']} done in {time.monotonic() - t0:.0f}s{' ERROR ' + res.error if res.error else ''}", flush=True)
+            quota_hit = quota_hit or res.error == "daily_quota"
+            row = {
+                "file": gold["file"],
+                "seconds": round(time.monotonic() - t0, 2),
+                "input_tokens": res.input_tokens,
+                "output_tokens": res.output_tokens,
+                "refused": res.refused,
+                "error": res.error,
+                "pred": res.leads,
+            }
+            if not res.error:
+                cached.write_text(json.dumps(row, ensure_ascii=False))
+        row["score"] = score_one(gold, row["pred"])
+        return row
 
     with ThreadPoolExecutor(max_workers=args.workers) as pool:
         rows = list(pool.map(run, labels))

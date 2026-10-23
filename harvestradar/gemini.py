@@ -5,6 +5,7 @@ import mimetypes
 import time
 from pathlib import Path
 
+import httpx
 from google import genai
 from google.genai import errors, types
 
@@ -12,7 +13,9 @@ from .extract import ExtractResult
 from .prompt import LEAD_SCHEMA, PROMPT_VERSION, SYSTEM_PROMPT
 
 # The free tier allows only a few requests per minute, so back off on 429.
+# 500/503 ("high demand") are transient too, so retry them the same way.
 _RETRY_WAITS = [15, 30, 60, 60]
+_RETRY_CODES = {429, 500, 503}
 
 
 def extract_leads_gemini(path: Path, model: str, client: genai.Client | None = None) -> ExtractResult:
@@ -30,9 +33,17 @@ def extract_leads_gemini(path: Path, model: str, client: genai.Client | None = N
         try:
             response = client.models.generate_content(model=model, contents=contents, config=config)
             break
-        except errors.ClientError as e:
-            if e.code != 429 or wait is None:
+        except errors.APIError as e:
+            # The free tier also has a per-day cap; waiting minutes won't help, so stop now.
+            if e.code == 429 and "PerDay" in str(e.details):
+                return ExtractResult([], model, PROMPT_VERSION, 0, 0, error="daily_quota")
+            if e.code not in _RETRY_CODES or wait is None:
                 return ExtractResult([], model, PROMPT_VERSION, 0, 0, error=f"{e.code}: {e.message}")
+            time.sleep(wait)
+        except httpx.TransportError as e:
+            # Dropped connections ("Server disconnected") happen under load.
+            if wait is None:
+                return ExtractResult([], model, PROMPT_VERSION, 0, 0, error=f"transport: {e}")
             time.sleep(wait)
 
     usage = response.usage_metadata
