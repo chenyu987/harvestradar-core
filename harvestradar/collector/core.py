@@ -9,12 +9,20 @@ Stop scrolling a group when any of these happens:
 Stop everything (kill switch) when any of these happens:
 - ChatApp shows a danger phrase (功能受限, 重新登录, ...), see safety.py
 - the main window disappears, shrinks to login size, or an extra dialog window opens
-- the open chat is not the group we searched for
-- our paste did not land in the search box
+- the open chat is not the group we clicked
+- a chat in the list gains a "[Draft]" it did not have before (something got typed)
 - a STOP file exists in the output folder (touch it to stop from another terminal)
+- the mouse is pushed into a screen corner (FailSafe)
+
+Groups are found by name in the sidebar chat list, from the top down. A chat
+with new messages moves to the top of that list, so a whitelisted group that is
+not in the first few screens of it has had no news; it is skipped this round.
 
 A kill writes the STOP file, so nothing runs again until a human deletes it.
-Someone moving the mouse is not a kill: the round is dropped and retried later.
+Someone using the Mac is not a kill: a round only starts after `idle_minutes`
+with no mouse or keyboard input and the screen unlocked, and it is dropped (and
+retried next time) as soon as the mouse moves or any key is pressed. That also
+keeps a human's typing from ever landing in ChatApp when it comes to the front.
 
 Output, per round, under <out_dir>/inbox/<date>/:
     <time>_<group>_<nn>.png     chat pane only, same crop as the eval set
@@ -33,7 +41,7 @@ from pathlib import Path
 
 from PIL import Image
 
-from harvestradar.collector.mac import Layout, Line, Window, find_search_result, inside, search_box_has
+from harvestradar.collector.mac import FailSafe, Layout, Line, Window, detect_layout, find_sidebar_rows, inside, sidebar_rows
 from harvestradar.collector.safety import danger_hits, normalize, title_matches
 from harvestradar.collector.timeparse import parse_divider
 
@@ -58,6 +66,10 @@ class Config:
     active_hours: tuple[int, int] = (9, 23)  # run only from 09:00 to 22:59
     pause_seconds: tuple[float, float] = (1.5, 4.0)  # between scrolls
     group_pause_seconds: tuple[float, float] = (20, 90)  # between groups
+    idle_minutes: float = 5  # start a round only after this long with nobody at the Mac
+    sidebar_pages: int = 5  # screens of the chat list to look through; quieter groups wait for next round
+    sidebar_scroll_clicks: int = 10  # wheel clicks per chat-list screen; a little overlap is fine
+    auto_layout: bool = True  # measure the window layout from each screenshot; [layout] is the fallback
     out_dir: str = "data/collector"
     layout: Layout = field(default_factory=Layout)
 
@@ -121,6 +133,9 @@ class Collector:
         self.out.mkdir(parents=True, exist_ok=True)
         self.state_path = self.out / "state.json"
         self.state = json.loads(self.state_path.read_text()) if self.state_path.exists() else {}
+        self.layout = cfg.layout
+        self.drafts: dict[str, bool] = {}  # chat name -> showed "[Draft]" when last seen
+        self.round_started = time.monotonic()
 
     # ---------- files ----------
 
@@ -150,6 +165,10 @@ class Collector:
             raise KillSwitch("STOP file present")
         if self.mac.user_active():
             raise HumanActive("mouse moved")
+        if self.mac.key_idle_seconds() < time.monotonic() - self.round_started:
+            raise HumanActive("a key was pressed")
+        if self.mac.screen_locked():
+            raise HumanActive("screen locked")
         win = self.mac.window()
         if win is None:
             raise KillSwitch("ChatApp window not found (logged out or quit?)")
@@ -158,50 +177,46 @@ class Collector:
         if not allow_extra and (n := self.mac.extra_windows()):
             raise KillSwitch(f"{n} extra ChatApp window(s) open (dialog?)")
         full = self.mac.capture(name)
+        if self.cfg.auto_layout:
+            with Image.open(full) as img:
+                found = detect_layout(img, win, self.cfg.layout)
+            if found and found != self.layout:
+                self.log("layout", **asdict(found))
+            self.layout = found or self.cfg.layout
+            self.mac.layout = self.layout
         lines = self.mac.ocr(full, win)
         if not lines:
             raise KillSwitch("OCR found no text: Screen Recording permission missing, or the screen is locked")
         if hits := danger_hits([l.text for l in lines], ignore=self.cfg.groups):
             raise KillSwitch(f"danger words on screen: {', '.join(sorted(set(hits)))}")
+        self.check_drafts(win, lines)
         return win, full, lines
 
+    def check_drafts(self, win: Window, lines: list[Line]) -> None:
+        """The collector never types, so a chat that gains a "[Draft]" while it runs
+        means a key went somewhere. Drafts already there before are left alone."""
+        for row in sidebar_rows(lines, self.layout, win):
+            name = normalize(row.name.text)
+            if len(name) < 2:
+                continue
+            if row.draft and self.drafts.get(name) is False:
+                raise KillSwitch(f"new draft in chat list: {row.name.text}")
+            if row.draft and name not in self.drafts:
+                self.log("draft_present", chat=row.name.text, note="was there before this run; please clear it by hand")
+            self.drafts[name] = row.draft
+
     def check_title(self, win: Window, lines: list[Line], group: str) -> None:
-        header = [l.text for l in lines if inside(l, self.cfg.layout.header(win))]
+        header = [l.text for l in lines if inside(l, self.layout.header(win))]
         if not title_matches(header, group):
             raise KillSwitch(f"open chat is {header[:2]}, expected {group}")
 
     # ---------- one group ----------
 
-    def open_group(self, group: str) -> None:
-        self.mac.activate()
-        self.mac.search(group)
-        # Search results take a moment, and may be a pop-up window of their own,
-        # so allow extra windows here and poll for a few seconds.
-        hit = None
-        for attempt in range(4):
-            win, _, lines = self.look(f"search{attempt}", allow_extra=True)
-            if not search_box_has(lines, group, self.cfg.layout, win):
-                # The paste went somewhere else, maybe a chat's message box. Nothing was sent
-                # (we never press Enter), but a human should check for a leftover draft.
-                raise KillSwitch(f"group name did not appear in the search box: {group}")
-            if hit := find_search_result(lines, group, self.cfg.layout, win):
-                break
-            if attempt == 1:
-                self.mac.nudge_search()
-            else:
-                self.sleep(1.0)
-        if hit is None:
-            self.log("group_not_found", group=group)
-            raise LookupError(group)
-        self.mac.click(win, hit)
-        self.sleep(self.rand.uniform(*self.cfg.pause_seconds))
-
-    def scan_group(self, group: str, open_it: bool = True) -> GroupResult:
+    def scan_group(self, group: str) -> GroupResult:
+        """Scan the chat that is open now. It must be `group` (checked on every screen)."""
         now = self.now()
         st = self.state.get(group, {})
         checkpoint = datetime.fromisoformat(st["checkpoint"]) if "checkpoint" in st else now - timedelta(days=self.cfg.first_run_days)
-        if open_it:
-            self.open_group(group)
 
         day_dir = self.out / "inbox" / now.strftime("%Y%m%d")
         day_dir.mkdir(parents=True, exist_ok=True)
@@ -216,7 +231,7 @@ class Collector:
         for i in range(self.cfg.max_screens):
             win, full, lines = self.look(f"screen{i:02d}")
             self.check_title(win, lines, group)  # every screen, in case something switched chats
-            pane = [l for l in lines if inside(l, self.cfg.layout.chat_pane(win))]
+            pane = [l for l in lines if inside(l, self.layout.chat_pane(win))]
             key = text_key(pane)
             if i == 0 and key == st.get("first_key"):
                 stop = "no_new"
@@ -242,7 +257,7 @@ class Collector:
             prev_lines = cur_lines
 
             dest = day_dir / f"{stamp}_{slug(group)}_{i:02d}.png"
-            crop_chat(full, win, self.cfg.layout, dest)
+            crop_chat(full, win, self.layout, dest)
             dividers = [d for l in pane if (d := parse_divider(l.text, now)) and d <= now + timedelta(minutes=5)]
             if dividers and newest is None:
                 newest = max(dividers)  # screens go newest to oldest, so the first divider seen wins
@@ -271,16 +286,56 @@ class Collector:
     # ---------- rounds ----------
 
     def round(self) -> list[GroupResult]:
-        groups = list(self.cfg.groups)
-        self.rand.shuffle(groups)
-        results = []
-        for n, g in enumerate(groups):
-            if n:
-                self.sleep(self.rand.uniform(*self.cfg.group_pause_seconds))
-            try:
+        """Walk the chat list from the top. Whenever a whitelisted group is on
+        screen, click it and scan it, then look at the list again (a new message
+        anywhere reorders it). Groups not seen in `sidebar_pages` screens had no
+        news and wait for the next round."""
+        todo = set(self.cfg.groups)
+        results: list[GroupResult] = []
+        if self.mac.screen_locked():
+            raise HumanActive("screen locked")
+        if (idle := self.mac.idle_seconds()) < self.cfg.idle_minutes * 60:
+            raise HumanActive(f"someone used the Mac {idle:.0f} s ago")
+        self.round_started = time.monotonic()
+        self.mac.activate()
+        win = self.mac.window()
+        if win is None:
+            raise KillSwitch("ChatApp window not found (logged out or quit?)")
+        self.look("sidebar_top")  # measures the layout before the first scroll
+        self.mac.scroll_sidebar(win, self.cfg.sidebar_pages * self.cfg.sidebar_scroll_clicks * 2)  # to the top
+        self.sleep(1.0)
+        page, prev_key = 0, None
+        while todo and page < self.cfg.sidebar_pages:
+            win, _, lines = self.look(f"sidebar{page:02d}")
+            picked = None
+            for g in sorted(todo, key=lambda _: self.rand.random()):
+                hits = find_sidebar_rows(lines, g, self.layout, win)
+                if len(hits) > 1:
+                    self.log("group_ambiguous", group=g, rows=[h.text for h in hits])
+                    todo.discard(g)
+                elif hits:
+                    picked = (g, hits[0])
+                    break
+            if picked:
+                g, row = picked
+                todo.discard(g)
+                if results:
+                    self.sleep(self.rand.uniform(*self.cfg.group_pause_seconds))
+                self.mac.click(win, row)
+                self.sleep(self.rand.uniform(*self.cfg.pause_seconds))
                 results.append(self.scan_group(g))
-            except LookupError:
-                continue
+                continue  # same list screen again: it may have changed
+            key = text_key([l for l in lines if inside(l, self.layout.chat_list(win))])
+            if key == prev_key:
+                break  # bottom of the chat list
+            prev_key = key
+            page += 1
+            if page < self.cfg.sidebar_pages:
+                self.mac.scroll_sidebar(win, -self.cfg.sidebar_scroll_clicks)
+                self.sleep(self.rand.uniform(*self.cfg.pause_seconds))
+        for g in sorted(todo):
+            self.log("not_in_recent", group=g, pages=page,
+                     note="not near the top of the chat list, so no new messages; next round")
         return results
 
     def in_active_hours(self) -> bool:
@@ -298,6 +353,9 @@ class Collector:
                     self.round()
                 except HumanActive as e:
                     self.log("paused", reason=str(e))
+                except FailSafe as e:
+                    self.kill(str(e))
+                    return
                 except KillSwitch as e:
                     self.kill(str(e))
                     return
