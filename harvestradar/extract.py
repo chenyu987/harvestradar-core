@@ -34,13 +34,16 @@ def _image_block(path: Path) -> dict:
     return {"type": "image", "source": {"type": "base64", "media_type": media_type, "data": data}}
 
 
-def extract_leads(
-    image_path: str | Path,
-    model: str = DEFAULT_MODEL,
-    client: anthropic.Anthropic | None = None,
-) -> ExtractResult:
+def extract_leads(image_path: str | Path, model: str = DEFAULT_MODEL, client=None) -> ExtractResult:
+    """Route by model name: "gemini-*" goes to Google, everything else to Claude."""
+    if model.startswith("gemini"):
+        from .gemini import extract_leads_gemini
+        return extract_leads_gemini(Path(image_path), model, client)
+    return _extract_claude(Path(image_path), model, client)
+
+
+def _extract_claude(path: Path, model: str, client: anthropic.Anthropic | None) -> ExtractResult:
     client = client or anthropic.Anthropic()
-    path = Path(image_path)
 
     kwargs: dict = {
         "model": model,

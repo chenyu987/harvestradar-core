@@ -34,6 +34,7 @@ PRICES = {
     "claude-sonnet-5-5": (2.00, 10.00),
     "claude-haiku-5-5": (0.10, 0.50),
 }
+# Gemini models run on the free tier for now, so they cost $0 here.
 
 LOCATION_ALIASES = {"lks": "lakeside", "lakesidenorth": "lakeside", "hillcresteast": "hillcrest"}
 
@@ -122,7 +123,12 @@ def main() -> None:
 
     data = Path(args.data)
     labels = [json.loads(l) for l in (data / "labels.jsonl").read_text().splitlines() if l.strip()]
-    client = anthropic.Anthropic()
+    if args.model.startswith("gemini"):
+        from google import genai
+        client = genai.Client()
+        args.workers = 1  # free-tier rate limits
+    else:
+        client = anthropic.Anthropic()
 
     def run(gold: dict) -> dict:
         t0 = time.monotonic()
