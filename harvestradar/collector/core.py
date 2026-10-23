@@ -52,6 +52,13 @@ class KillSwitch(Exception):
     """Something looks wrong with ChatApp or the account. Stop and wait for a human."""
 
 
+HAND_STOP = "stopped by hand"  # what `stop` writes into the STOP file
+
+
+class Stopped(Exception):
+    """Someone ran `stop`. Not a kill: the next `run` clears it by itself."""
+
+
 class HumanActive(Exception):
     """Someone is using the Mac. Drop this round and try again later."""
 
@@ -63,6 +70,7 @@ class Config:
     first_run_days: int = 3
     scroll_clicks: int = 30  # starting value; adjusted per group from how much screens overlap
     interval_minutes: tuple[float, float] = (30, 60)
+    run_hours: float = 0  # `run` stops by itself after this many hours; 0 = until `stop`
     active_hours: tuple[int, int] = (9, 23)  # run only from 09:00 to 22:59
     pause_seconds: tuple[float, float] = (1.5, 4.0)  # between scrolls
     group_pause_seconds: tuple[float, float] = (20, 90)  # between groups
@@ -162,6 +170,8 @@ class Collector:
     def look(self, name: str, allow_extra: bool = False) -> tuple[Window, Path, list[Line]]:
         """Screenshot + OCR the ChatApp window, and run every safety check on it."""
         if self.stop_file.exists():
+            if self.stop_file.read_text().startswith(HAND_STOP):
+                raise Stopped(HAND_STOP)
             raise KillSwitch("STOP file present")
         if self.mac.user_active():
             raise HumanActive("mouse moved")
@@ -342,9 +352,13 @@ class Collector:
         start, end = self.cfg.active_hours
         return start <= self.now().hour < end
 
-    def run_forever(self) -> None:
-        self.log("start", groups=self.cfg.groups, version=COLLECTOR_VERSION)
-        while True:
+    def run(self, hours: float = 0) -> None:
+        """Rounds every `interval_minutes` until `hours` have passed (0 = until stopped).
+        Started by hand only; `stop` from another terminal ends it within seconds."""
+        started = time.monotonic()
+        left = lambda: hours * 3600 - (time.monotonic() - started) if hours else float("inf")
+        self.log("start", groups=self.cfg.groups, hours=hours or None, version=COLLECTOR_VERSION)
+        while left() > 0:
             if self.stop_file.exists():
                 self.log("stopped", reason=self.stop_file.read_text().strip())
                 return
@@ -353,12 +367,16 @@ class Collector:
                     self.round()
                 except HumanActive as e:
                     self.log("paused", reason=str(e))
-                except FailSafe as e:
+                except Stopped:
+                    self.log("stopped", reason=HAND_STOP)
+                    return
+                except (FailSafe, KillSwitch) as e:
                     self.kill(str(e))
                     return
-                except KillSwitch as e:
-                    self.kill(str(e))
-                    return
-            wait = self.rand.uniform(*self.cfg.interval_minutes) * 60
+            wait = min(self.rand.uniform(*self.cfg.interval_minutes) * 60, left())
             self.log("sleep", minutes=round(wait / 60, 1))
-            self.sleep(wait)
+            end = time.monotonic() + wait
+            while time.monotonic() < end and not self.stop_file.exists():
+                self.sleep(min(10, end - time.monotonic()))
+        self.log("finished", hours=hours)
+        self.mac.notify("HarvestRadar 跑完了", f"按设定跑满 {hours:g} 小时，已停止")

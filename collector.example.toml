@@ -8,7 +8,8 @@ sidebar_pages = 5         # 左栏最多往下翻几屏找群
 max_screens = 15          # 每个群最多往上翻几屏
 first_run_days = 3        # 第一次跑往回看几天
 scroll_clicks = 30        # 每次滚轮滚几格（起始值）。两屏重叠太多会自动加大，完全不重叠会自动减小并在日志记 no_overlap
-interval_minutes = [30, 60]   # 两轮之间随机等多久
+interval_minutes = [30, 60]   # 两轮之间随机等多久（run --every 20-40 可临时改）
+run_hours = 0                 # run 跑多少小时后自己停；0 = 一直跑到 stop（run --hours 3 可临时改）
 active_hours = [9, 23]        # 只在 9:00–22:59 跑
 idle_minutes = 5              # 鼠标键盘都没人碰满这么久才开始一轮；中途有人动就放弃这一轮
 pause_seconds = [1.5, 4.0]    # 每次滚动后随机停多久

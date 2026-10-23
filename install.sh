@@ -1,33 +1,11 @@
 #!/bin/zsh
-# Set up the ChatApp collector on this Mac, as a background service that starts
-# at login and restarts if it crashes. Safe to run again (e.g. after git pull).
-#
-#   ./install.sh             install or update
-#   ./install.sh status      is it running? last log lines
-#   ./install.sh uninstall   remove the service (keeps data/ and collector.toml)
+# Set up the ChatApp collector on this Mac: Python, packages, collector.toml.
+# Installs nothing that starts by itself; the collector runs only when you start it.
+# Safe to run again (e.g. after git pull).
 set -euo pipefail
 
 REPO=${0:A:h}
-LABEL=com.example.harvestradar
-PLIST=~/Library/LaunchAgents/$LABEL.plist
-DOMAIN=gui/$(id -u)
 OUT=$REPO/data/collector
-
-cmd=${1:-install}
-
-if [[ $cmd == uninstall ]]; then
-  launchctl bootout $DOMAIN/$LABEL 2>/dev/null || true
-  rm -f $PLIST
-  echo "已移除后台服务。data/ 和 collector.toml 都还在。"
-  exit 0
-fi
-
-if [[ $cmd == status ]]; then
-  launchctl print $DOMAIN/$LABEL 2>/dev/null | grep -E "state =|last exit code|pid =" || echo "后台服务没装。"
-  [[ -f $OUT/STOP ]] && echo "STOP 文件在: $(cat $OUT/STOP)"
-  [[ -f $OUT/log.jsonl ]] && { echo "--- 最近的日志"; tail -n 8 $OUT/log.jsonl; }
-  exit 0
-fi
 
 [[ $(uname) == Darwin ]] || { echo "只能在 Mac 上装。"; exit 1; }
 
@@ -52,8 +30,6 @@ if [[ ! -x $REPO/.venv/bin/python ]] || ! $REPO/.venv/bin/python -c 'import sys;
 fi
 $REPO/.venv/bin/pip install -q --upgrade pip
 $REPO/.venv/bin/pip install -q -r $REPO/requirements.txt
-PY=$REPO/.venv/bin/python
-REAL=$($PY -c 'import os, sys; print(os.path.realpath(sys.executable))')
 
 # 3. config
 if [[ ! -f $REPO/collector.toml ]]; then
@@ -64,43 +40,15 @@ if [[ ! -f $REPO/collector.toml ]]; then
 fi
 mkdir -p $OUT
 
-# 4. background service
-mkdir -p ~/Library/LaunchAgents
-cat > $PLIST <<PL
-<?xml version="1.0" encoding="UTF-8"?>
-<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-<plist version="1.0">
-<dict>
-  <key>Label</key><string>$LABEL</string>
-  <key>ProgramArguments</key>
-  <array>
-    <string>$PY</string><string>-m</string><string>harvestradar.collector</string><string>run</string>
-  </array>
-  <key>WorkingDirectory</key><string>$REPO</string>
-  <key>RunAtLoad</key><true/>
-  <!-- restart after a crash or a missing permission, not after STOP or a kill switch -->
-  <key>KeepAlive</key><dict><key>SuccessfulExit</key><false/></dict>
-  <key>ThrottleInterval</key><integer>300</integer>
-  <key>LimitLoadToSessionType</key><string>Aqua</string>
-  <key>StandardOutPath</key><string>$OUT/service.log</string>
-  <key>StandardErrorPath</key><string>$OUT/service.log</string>
-</dict>
-</plist>
-PL
-launchctl bootout $DOMAIN/$LABEL 2>/dev/null || true
-launchctl bootstrap $DOMAIN $PLIST
-
 cat <<MSG
 
-装好了，后台服务已启动，以后开机登录会自己跑。
+装好了。它不会自己启动，要跑的时候在终端里：
+  cd $REPO
+  .venv/bin/python -m harvestradar.collector doctor              # 先查权限（不动鼠标键盘）
+  .venv/bin/python -m harvestradar.collector run --hours 3       # 跑 3 小时后自己停；不写 --hours 就一直跑
+  .venv/bin/python -m harvestradar.collector run --every 20-40   # 每 20–40 分钟一轮
+  .venv/bin/python -m harvestradar.collector stop                # 另开终端停掉
 
-还差一次性的两个权限（每台 Mac 只做一次）：
-  系统设置 → 隐私与安全性 → 「屏幕录制」和「辅助功能」
-  把列表里的 Python（$REAL）打开。
-  列表里没有的话，点 + 按 ⌘⇧G 粘贴上面的路径加进去。
-服务没权限时会弹通知提醒你，打开后 5 分钟内自己重试。
-
-查看状态:  ./install.sh status
-急停:      $PY -m harvestradar.collector stop
-恢复:      $PY -m harvestradar.collector resume
+第一次要给「终端」开两个权限（每台 Mac 一次）：
+  系统设置 → 隐私与安全性 → 「屏幕录制」和「辅助功能」→ 打开「终端」，然后重开终端。
 MSG

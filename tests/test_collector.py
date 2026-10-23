@@ -199,6 +199,16 @@ class CollectorTest(unittest.TestCase):
         log = (self.tmp / "out" / "log.jsonl").read_text()
         self.assertIn('"not_in_recent", "group": "没有新消息的群"', log)
 
+    def test_run_stops_on_stop_file(self):
+        mac = FakeMac(self.tmp, [["14:30"], ["13:00"]])
+        col = self.collector(mac)
+        col.sleep = lambda s: col.stop_file.write_text("stopped by hand\n")  # someone runs `stop` while it waits
+        col.run(hours=1)
+        log = (self.tmp / "out" / "log.jsonl").read_text()
+        self.assertIn('"stopped"', log)
+        self.assertNotIn("KILL", log)  # a stop by hand is not a kill switch
+        self.assertEqual(col.stop_file.read_text(), "stopped by hand\n")
+
     def test_waits_for_nobody_at_the_mac(self):
         mac = FakeMac(self.tmp, [["14:30"]])
         mac.idle = 30

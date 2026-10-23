@@ -4,10 +4,10 @@
     python -m harvestradar.collector check                       # no input: screenshot, OCR, draw the measured layout
     python -m harvestradar.collector scan-current --group 群名   # scroll the chat that is already open, no click
     python -m harvestradar.collector once                        # one round over every group in collector.toml
-    python -m harvestradar.collector run                         # rounds every 30-60 min, daytime only, until STOP
-    python -m harvestradar.collector stop | resume               # create / delete the STOP file
+    python -m harvestradar.collector run [--hours 3] [--every 20-40]   # keep going: a round every 20-40 min, for 3 hours
+    python -m harvestradar.collector stop | resume               # stop a running `run` / clear a kill switch
 
-`install.sh` sets up `run` as a background service that starts at login.
+Nothing starts by itself: `run` only runs while a human has started it.
 """
 
 import argparse
@@ -17,9 +17,7 @@ import sys
 from dataclasses import asdict
 from pathlib import Path
 
-from harvestradar.collector.core import Collector, Config, FailSafe, HumanActive, KillSwitch
-
-SERVICE = "com.example.harvestradar"  # launchd label, see install.sh
+from harvestradar.collector.core import HAND_STOP, Collector, Config, FailSafe, HumanActive, KillSwitch, Stopped
 
 
 def cmd_doctor(cfg: Config, mac) -> int:
@@ -112,7 +110,9 @@ def main() -> None:
     sc = sub.add_parser("scan-current")
     sc.add_argument("--group", required=True, help="the chat that is open right now (checked against the title bar)")
     sub.add_parser("once")
-    sub.add_parser("run")
+    rn = sub.add_parser("run")
+    rn.add_argument("--hours", type=float, help="stop by itself after this many hours (default: run_hours in collector.toml; 0 = until stop)")
+    rn.add_argument("--every", help="minutes between rounds, e.g. 30-60 or 20 (default: interval_minutes in collector.toml)")
     sub.add_parser("stop")
     sub.add_parser("resume")
     args = ap.parse_args()
@@ -121,16 +121,13 @@ def main() -> None:
     stop_file = Path(cfg.out_dir) / "STOP"
     if args.cmd == "stop":
         stop_file.parent.mkdir(parents=True, exist_ok=True)
-        stop_file.write_text("stopped by hand\n")
-        return print("已创建 STOP，正在跑的会在下一屏停下。")
+        stop_file.write_text(HAND_STOP + "\n")
+        return print("已停止：正在跑的会在几秒内停下。下次 run 会自动清掉这个停止标记。")
     if args.cmd == "resume":
         if stop_file.exists():
             print("删除 STOP，原因是：", stop_file.read_text().strip())
             stop_file.unlink()
-        # If the background service is installed, start it again (it exits on STOP).
-        import subprocess
-        r = subprocess.run(["launchctl", "kickstart", f"gui/{os.getuid()}/{SERVICE}"], capture_output=True)
-        return print("后台服务已重新启动。" if r.returncode == 0 else "可以重新运行了。")
+        return print("可以重新运行了。")
 
     from harvestradar.collector.mac import MacBackend
     mac = MacBackend(cfg.layout, Path(cfg.out_dir) / "tmp")
@@ -141,18 +138,30 @@ def main() -> None:
 
     col = Collector(cfg, mac)
     if args.cmd == "run":
+        # A stop by hand only ends that run; a kill switch needs `resume` after a human looked.
+        if stop_file.exists() and stop_file.read_text().startswith(HAND_STOP):
+            stop_file.unlink()
+        if stop_file.exists():
+            sys.exit(f"急停标记还在：{stop_file.read_text().strip()}\n看过聊天软件没问题后运行 resume 再 run。")
+        if args.every:
+            lo, _, hi = args.every.partition("-")
+            cfg.interval_minutes = (float(lo), float(hi or lo))
+        hours = cfg.run_hours if args.hours is None else args.hours
         if not (mac.has_screen_recording() and mac.has_accessibility()):
-            # Under launchd nobody sees the terminal: ask macOS to list us in
-            # Settings, tell the human, and exit; launchd tries again later.
             mac.request_permissions()
-            mac.notify("HarvestRadar 需要权限", f"在 隐私与安全性 的 屏幕录制 和 辅助功能 里打开 {os.path.realpath(sys.executable)}")
-            col.log("no_permission", python=os.path.realpath(sys.executable))
-            sys.exit(78)
+            sys.exit("没有「屏幕录制」或「辅助功能」权限，先跑 doctor 看怎么开。")
         import subprocess
         # Keep the Mac and its display awake while we run (screenshots of a dark
         # screen have no text); -w ends it when this process ends.
         subprocess.Popen(["caffeinate", "-dims", "-w", str(os.getpid())])
-        return col.run_forever()
+        lo, hi = cfg.interval_minutes
+        print(f"开始：每 {lo:g}–{hi:g} 分钟一轮，" + (f"{hours:g} 小时后自己停。" if hours else "直到运行 stop。")
+              + "\n停止：另开终端运行 stop，或在这里按 Ctrl+C，或把鼠标甩到屏幕角上。", flush=True)
+        try:
+            return col.run(hours)
+        except KeyboardInterrupt:
+            col.log("stopped", reason="Ctrl+C")
+            return print("\n已停止。")
     try:
         if args.cmd == "scan-current":
             mac.activate()
@@ -164,6 +173,8 @@ def main() -> None:
         sys.exit(f"急停：{e}\n看过没问题后运行 resume 再继续。")
     except HumanActive as e:
         sys.exit(f"有人在用这台 Mac（{e}），这一轮放弃。")
+    except Stopped:
+        sys.exit("已按 stop 停下。")
     for r in results:
         print(json.dumps({"group": r.group, "screens": len(r.screens), "stop": r.stop, "newest": r.newest}, ensure_ascii=False))
 
