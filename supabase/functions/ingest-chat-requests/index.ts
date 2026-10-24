@@ -40,7 +40,8 @@ Deno.serve(async (req) => {
   const requests = body.requests;
   if (!Array.isArray(requests) || requests.length > MAX_ROWS) return json({ error: `requests: array of at most ${MAX_ROWS}` }, 400);
 
-  // Only known columns: status, person_id, handled_by etc. are for the admin app, not the collector.
+  // Only known columns: status and admin_note are for the admin app, not the collector.
+  // With LEADS_API_TOKEN unset every request is turned away (sameToken never matches an empty token).
   const rows = requests.map((l) => Object.fromEntries(FIELDS.filter((f) => f in l).map((f) => [f, l[f]])));
   if (rows.some((r) => !r.dedup_key || !r.group_name || !r.sender || !r.quote)) {
     return json({ error: "each request needs dedup_key, group_name, sender, quote" }, 400);
