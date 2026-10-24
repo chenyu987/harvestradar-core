@@ -25,7 +25,7 @@ class FakeServer:
             return httpx.Response(500, json={"error": "down"})
         if request.headers.get("x-ingest-token") != "tok":
             return httpx.Response(401, json={"error": "bad token"})
-        new = [r for r in json.loads(request.content)["leads"] if r["dedup_key"] not in self.rows]
+        new = [r for r in json.loads(request.content)["requests"] if r["dedup_key"] not in self.rows]
         self.rows.update((r["dedup_key"], r) for r in new)
         return httpx.Response(200, json={"received": 1, "inserted": len(new)})
 
@@ -42,7 +42,7 @@ class LeadsSyncTest(unittest.TestCase):
                 f.write(json.dumps(l, ensure_ascii=False) + "\n")
 
     def push(self, server, token="tok"):
-        return push(self.out, "https://x/functions/v1/ingest-leads", token,
+        return push(self.out, "https://x/functions/v1/ingest-chat-requests", token,
                     client=httpx.Client(transport=httpx.MockTransport(server)), log=lambda *_: None)
 
     def test_sends_once(self):

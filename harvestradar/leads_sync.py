@@ -1,10 +1,10 @@
-"""Send new leads from data/collector/leads.jsonl to the admin app's 求单 page.
+"""Send new leads from data/collector/leads.jsonl to the admin app's Request (求单) page.
 
 Usage (process does this by itself at the end when the two settings are there):
     python -m harvestradar.leads_sync
 
 Settings, from the environment or a .env file in the repo root (not in git):
-    LEADS_API_URL    https://<project>.supabase.co/functions/v1/ingest-leads
+    LEADS_API_URL    https://<project>.supabase.co/functions/v1/ingest-chat-requests
     LEADS_API_TOKEN  the token set on that function; it can only add leads
 
 leads.jsonl stays the record on this Mac. Keys already sent are listed in
@@ -85,7 +85,7 @@ def push(out_dir: Path, url: str, token: str, client: httpx.Client | None = None
     for i in range(0, len(rows), BATCH):
         batch = rows[i:i + BATCH]
         try:
-            resp = client.post(url, json={"leads": batch}, headers={"x-ingest-token": token})
+            resp = client.post(url, json={"requests": batch}, headers={"x-ingest-token": token})
             resp.raise_for_status()
             added += resp.json().get("inserted", 0)
         except (httpx.HTTPError, ValueError) as e:

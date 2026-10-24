@@ -1,9 +1,9 @@
-// The collector Mac posts new leads here. It holds only LEADS_API_TOKEN, which
-// can add rows to public.leads and nothing else: no reads, no other tables.
-// The table lives in the admin app's database (chenyu987/admin-app, migration 0029).
+// The collector Mac posts new requests (求单) here. It holds only LEADS_API_TOKEN, which
+// can add rows to public.chat_requests and nothing else: no reads, no other tables.
+// The table lives in the admin app's database (chenyu987/admin-app, migration 0029_chat_requests).
 // Deploy with JWT verification off: the token below is the check.
 //
-// POST {"leads": [{dedup_key, group_name, sender, ...}]}
+// POST {"requests": [{dedup_key, group_name, sender, ...}]}
 // header x-ingest-token: <LEADS_API_TOKEN>
 // -> {"received": n, "inserted": m}   (rows already there are skipped by dedup_key)
 
@@ -31,23 +31,23 @@ Deno.serve(async (req) => {
   const token = Deno.env.get("LEADS_API_TOKEN") ?? "";
   if (!sameToken(req.headers.get("x-ingest-token") ?? "", token)) return json({ error: "bad token" }, 401);
 
-  let body: { leads?: Record<string, unknown>[] };
+  let body: { requests?: Record<string, unknown>[] };
   try {
     body = await req.json();
   } catch {
     return json({ error: "bad json" }, 400);
   }
-  const leads = body.leads;
-  if (!Array.isArray(leads) || leads.length > MAX_ROWS) return json({ error: `leads: array of at most ${MAX_ROWS}` }, 400);
+  const requests = body.requests;
+  if (!Array.isArray(requests) || requests.length > MAX_ROWS) return json({ error: `requests: array of at most ${MAX_ROWS}` }, 400);
 
   // Only known columns: status, person_id, handled_by etc. are for the admin app, not the collector.
-  const rows = leads.map((l) => Object.fromEntries(FIELDS.filter((f) => f in l).map((f) => [f, l[f]])));
+  const rows = requests.map((l) => Object.fromEntries(FIELDS.filter((f) => f in l).map((f) => [f, l[f]])));
   if (rows.some((r) => !r.dedup_key || !r.group_name || !r.sender || !r.quote)) {
-    return json({ error: "each lead needs dedup_key, group_name, sender, quote" }, 400);
+    return json({ error: "each request needs dedup_key, group_name, sender, quote" }, 400);
   }
 
   const db = createClient(Deno.env.get("SUPABASE_URL")!, Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!);
-  const { data, error } = await db.from("leads")
+  const { data, error } = await db.from("chat_requests")
     .upsert(rows, { onConflict: "dedup_key", ignoreDuplicates: true })
     .select("id");
   if (error) return json({ error: error.message }, 500);
