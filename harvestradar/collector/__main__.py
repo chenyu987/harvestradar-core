@@ -132,6 +132,15 @@ def main() -> None:
             stop_file.unlink()
         return print("可以重新运行了。")
 
+    # 抓哪些群：后台的群名单（求单页上管），拿不到就用上次存的，再不行用 collector.toml
+    from harvestradar import groups, leads_sync
+    url, token = leads_sync.settings()
+    found, source = groups.resolve(Path(cfg.out_dir), cfg.groups, url, token)
+    cfg.groups = [g["name"] for g in found]
+    print(f"群名单来自{source}：{len(cfg.groups)} 个群", flush=True)
+    if not cfg.groups and args.cmd in ("run", "once"):
+        sys.exit("没有要抓的群：去后台求单页的「群名单」里加群，或者把停抓的打开。")
+
     from harvestradar.collector.mac import MacBackend
     mac = MacBackend(cfg.layout, Path(cfg.out_dir) / "tmp")
     if args.cmd == "doctor":
