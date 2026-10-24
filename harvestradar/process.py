@@ -10,6 +10,8 @@ each screenshot once:
 1. Prefilter on the OCR text the collector already saved (no second OCR). The
    local model is used when Ollama answers; otherwise keywords only. Fails open.
 2. Screenshots that item go to the cloud extractor (same prompt and schema as the evals).
+   A screenshot whose text matches one already sent (same group, same OCR text,
+   e.g. a quiet group grabbed again) is not sent twice.
 3. Requests (kind == "request") are appended to <out_dir>/leads.jsonl, deduplicated
    by group + sender + quote. Neighboring screens overlap, so the same message is
    usually seen twice; only the first sighting is kept.
@@ -23,6 +25,7 @@ and stay out of git.
 """
 
 import argparse
+import hashlib
 import json
 import os
 from dataclasses import dataclass
@@ -36,7 +39,7 @@ from harvestradar.prefilter import DEFAULT_LOCAL_MODEL, OLLAMA_URL, PREFILTER_VE
 from harvestradar.prompt import PROMPT_VERSION
 
 DEFAULT_CLOUD_MODEL = "gemini-3.5-flash"
-DONE = {"dropped", "extracted"}
+DONE = {"dropped", "extracted", "same_as_sent"}
 MAX_ERRORS_IN_A_ROW = 3  # the API is down or the key is bad; stop instead of burning through the inbox
 
 
@@ -62,6 +65,14 @@ def lead_key(group: str, lead: dict) -> str:
     return "|".join([normalize(group), normalize(lead.get("sender", "")), normalize(lead.get("quote", ""))])
 
 
+def screen_key(shot: dict) -> str:
+    """Same group + same text on screen = same screenshot, as far as the extractor cares."""
+    text = normalize(shot.get("ocr_text") or "")
+    if not text:
+        return ""  # no OCR text to compare; always send
+    return hashlib.sha1(f"{normalize(shot.get('group', ''))}|{text}".encode()).hexdigest()
+
+
 def ollama_up(client: httpx.Client | None = None) -> bool:
     try:
         return (client or httpx.Client(timeout=3)).get(f"{OLLAMA_URL}/api/tags").status_code == 200
@@ -80,6 +91,7 @@ class Totals:
     dropped: int = 0
     extracted: int = 0
     pending: int = 0
+    same_as_sent: int = 0
     errors: int = 0
     new_leads: int = 0
     duplicates: int = 0
@@ -98,12 +110,16 @@ def process(out_dir: Path, cloud_model: str | None, local_model: str | None,
     if extract is None and cloud_model:
         from harvestradar.extract import extract_leads as extract
     processed_path, leads_path = out_dir / "processed.jsonl", out_dir / "leads.jsonl"
-    done = {r["file"] for r in read_jsonl(processed_path) if r.get("status") in DONE}
+    processed = read_jsonl(processed_path)
+    done = {r["file"] for r in processed if r.get("status") in DONE}
     seen = {lead_key(r["group"], r) for r in read_jsonl(leads_path)}
 
-    todo = []
+    shots = []
     for manifest in sorted((out_dir / "inbox").glob("*/manifest.jsonl")):
-        todo += [s for s in read_jsonl(manifest) if s.get("file") and s["file"] not in done]
+        shots += [s for s in read_jsonl(manifest) if s.get("file")]
+    extracted = {r["file"] for r in processed if r.get("status") == "extracted"}
+    sent = {k: s["file"] for s in shots if s["file"] in extracted and (k := screen_key(s))}
+    todo = [s for s in shots if s["file"] not in done]
     if limit:
         todo = todo[:limit]
 
@@ -118,6 +134,13 @@ def process(out_dir: Path, cloud_model: str | None, local_model: str | None,
             t.errors += 1
             append_jsonl(processed_path, {**record, "status": "error", "error": "screenshot missing"})
             log(f"  {path.name}  缺图，跳过")
+            continue
+
+        key = screen_key(shot)
+        if key in sent:
+            t.same_as_sent += 1
+            append_jsonl(processed_path, {**record, "status": "same_as_sent", "same_as": sent[key]})
+            log(f"  {path.name}  和已送过的 {Path(sent[key]).name} 一样，不再送")
             continue
 
         pf = prefilter(path, model=local_model or DEFAULT_LOCAL_MODEL, use_llm=bool(local_model),
@@ -151,6 +174,8 @@ def process(out_dir: Path, cloud_model: str | None, local_model: str | None,
         errors_in_a_row = 0
 
         t.extracted += 1
+        if key:
+            sent[key] = shot["file"]
         t.input_tokens += res.input_tokens
         t.output_tokens += res.output_tokens
         requests = [l for l in res.leads if l.get("kind") == "request"]
@@ -200,7 +225,8 @@ def main() -> None:
 
     out = Path(args.out_dir)
     t = process(out, cloud, local, limit=args.limit)
-    print(f"\n处理了 {t.screenshots} 张：丢掉 {t.dropped}，抽取 {t.extracted}，等送云端 {t.pending}，出错 {t.errors}")
+    print(f"\n处理了 {t.screenshots} 张：丢掉 {t.dropped}，和送过的一样 {t.same_as_sent}，抽取 {t.extracted}，"
+          f"等送云端 {t.pending}，出错 {t.errors}")
     if cloud:
         print(f"新求单 {t.new_leads} 条（重复的 {t.duplicates} 条没记），token {t.input_tokens}+{t.output_tokens}")
     print(f"线索在 {out / 'leads.jsonl'}，处理记录在 {out / 'processed.jsonl'}")
