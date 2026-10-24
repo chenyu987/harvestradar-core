@@ -229,8 +229,37 @@ class CollectorTest(unittest.TestCase):
         results = col.round()
         self.assertEqual(sorted(r.group for r in results), sorted([GROUP, "城西活动群"]))
         self.assertEqual([a[1] for a in mac.actions if a[0] == "click"], ["城西活动群", GROUP])
+        # the list ended without it: the name is wrong, or we left the group
+        self.assertEqual(col.not_found, {"没有新消息的群": "not_in_list"})
         log = (self.tmp / "out" / "log.jsonl").read_text()
-        self.assertIn('"not_in_recent", "group": "没有新消息的群"', log)
+        self.assertIn('"group_not_found", "group": "没有新消息的群"', log)
+
+    def long_list_mac(self, row):
+        """60 chats, 10 wheel clicks per row; GROUP sits at `row`."""
+        chats = [f"聊天{i:02d}" for i in range(60)]
+        chats[row] = GROUP
+        mac = FakeMac(self.tmp, [["14:30"], ["13:00"], ["Yesterday 10:02"], ["1/20 09:00"]])
+        mac.sidebar = None
+        top = [0]
+        mac.ocr_sidebar = lambda: chats[top[0]:top[0] + 12]
+        def scroll_sidebar(win, clicks):
+            mac.actions.append(("list", clicks))
+            top[0] = 0 if clicks > 0 else min(len(chats) - 12, top[0] + (-clicks) // 10)
+        mac.scroll_sidebar = scroll_sidebar
+        return mac
+
+    def test_quiet_group_far_down_is_skipped_and_reported(self):
+        self.cfg.sidebar_pages = 2
+        col = self.collector(self.long_list_mac(55))
+        self.assertEqual(col.round(), [])
+        self.assertEqual(col.not_found, {GROUP: "not_near_top"})
+
+    def test_days_searches_the_whole_list(self):
+        self.cfg.sidebar_pages = 2
+        col = self.collector(self.long_list_mac(55))
+        col.lookback_days = 14
+        self.assertEqual([r.group for r in col.round()], [GROUP])
+        self.assertEqual(col.not_found, {})
 
     def test_sidebar_scroll_learns_rows_per_click(self):
         # A long chat list where 10 wheel clicks move one row, as on the M1 Air (2026-10-24).

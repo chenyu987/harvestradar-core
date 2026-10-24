@@ -5,6 +5,7 @@
 # 有新消息的群会跑到左栏最上面，所以只在左栏前 sidebar_pages 屏里找；没找到说明没新消息，这次不看。
 groups = ["某某活动群｜壹", "另一个活动群"]
 sidebar_pages = 5         # 左栏最多往下翻几屏找群
+sidebar_max_pages = 40    # run --days N 时把左栏翻到底找群，最多几屏
 max_screens = 15          # 每个群最多往上翻几屏
 min_screens = 3           # 每个群至少往上翻几屏（就算没有新消息也翻，翻到群的最开头才停）
 lookback_max_screens = 80 # run --days N 往回翻时，每个群最多翻几屏
