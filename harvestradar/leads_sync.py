@@ -16,11 +16,12 @@ import argparse
 import hashlib
 import json
 import os
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 
 import httpx
 
+from harvestradar.collector.timeparse import parse_divider
 from harvestradar.groups import ids_by_name
 from harvestradar.process import lead_key, read_jsonl
 
@@ -52,6 +53,24 @@ def local_iso(naive: str | None) -> str | None:
         return None
 
 
+def sent_time(sent_at: str | None, captured_at: str | None) -> str | None:
+    """ChatApp's divider text ("Thursday 02:07", "Yesterday 10:02", "4/18 16:15") as an absolute
+    time, counted back from when the screenshot was taken. ChatApp shows this Mac's local time,
+    and only this Mac knows that zone, so it is worked out here and not in the admin app.
+    Unreadable text, or a time after the screenshot (a bare "12:53" on a screen grabbed at 01:24
+    can't be today), gives None and the admin page shows the text as it was."""
+    if not sent_at or not captured_at:
+        return None
+    try:
+        taken = datetime.fromisoformat(captured_at)
+    except ValueError:
+        return None
+    when = parse_divider(sent_at.strip(), taken)
+    if when is None or when > taken + timedelta(minutes=5):
+        return None
+    return when.astimezone().isoformat()
+
+
 def to_row(lead: dict, group_ids: dict[str, str] | None = None) -> dict:
     count = lambda v: v if isinstance(v, int) and v >= 0 else 0
     return {
@@ -66,6 +85,7 @@ def to_row(lead: dict, group_ids: dict[str, str] | None = None) -> dict:
         "female": count(lead.get("female")),
         "quote": lead.get("quote", ""),
         "sent_at": lead.get("sent_at") or None,
+        "sent_time": sent_time(lead.get("sent_at"), lead.get("captured_at")),
         "extractor_note": lead.get("notes") or None,
         "captured_at": local_iso(lead.get("captured_at")),
         "screenshot": Path(lead["file"]).name if lead.get("file") else None,

@@ -80,3 +80,21 @@ class LeadsSyncTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class SentTimeTest(unittest.TestCase):
+    def test_counted_back_from_the_screenshot(self):
+        from harvestradar.leads_sync import sent_time
+        taken = "2026-10-24T01:24:20"  # a Saturday
+        self.assertTrue(sent_time("Thursday 02:07", taken).startswith("2026-10-22T02:07:00"))
+        self.assertTrue(sent_time("Yesterday 10:02", taken).startswith("2026-10-23T10:02:00"))
+        self.assertTrue(sent_time("4/18 16:15", taken).startswith("2026-04-18T16:15:00"))
+        self.assertRegex(sent_time("4/18 16:15", taken), r"[+-]\d\d:\d\d$")  # zone attached
+
+    def test_unknown_or_impossible_is_none(self):
+        from harvestradar.leads_sync import sent_time
+        taken = "2026-10-24T01:24:20"
+        self.assertIsNone(sent_time("12:53", taken))  # later than the screenshot
+        self.assertIsNone(sent_time("上周", taken))
+        self.assertIsNone(sent_time("Thursday 02:07", None))
+        self.assertIsNone(sent_time(None, taken))
