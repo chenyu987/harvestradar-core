@@ -3,11 +3,11 @@
     python -m harvestradar.collector doctor                      # no input: permissions, ChatApp window, layout
     python -m harvestradar.collector check                       # no input: screenshot, OCR, draw the measured layout
     python -m harvestradar.collector scan-current --group 群名   # scroll the chat that is already open, no click
-    python -m harvestradar.collector once                        # one round over every group in collector.toml
-    python -m harvestradar.collector run [--hours 3] [--every 20-40]   # keep going: a round every 20-40 min, for 3 hours
-    python -m harvestradar.collector stop | resume               # stop a running `run` / clear a kill switch
+    python -m harvestradar.collector run                         # grab every group once, then turn the screenshots into leads
+    python -m harvestradar.collector once                        # grab only, no processing
+    python -m harvestradar.collector stop | resume               # stop a running grab / clear a kill switch
 
-Nothing starts by itself: `run` only runs while a human has started it.
+Nothing starts by itself and nothing repeats: each `run` grabs once, when a human asks.
 """
 
 import argparse
@@ -111,8 +111,8 @@ def main() -> None:
     sc.add_argument("--group", required=True, help="the chat that is open right now (checked against the title bar)")
     sub.add_parser("once")
     rn = sub.add_parser("run")
-    rn.add_argument("--hours", type=float, help="stop by itself after this many hours (default: run_hours in collector.toml; 0 = until stop)")
-    rn.add_argument("--every", help="minutes between rounds, e.g. 30-60 or 20 (default: interval_minutes in collector.toml)")
+    rn.add_argument("--model", help="cloud extractor model for the screenshots (default: process's default)")
+    rn.add_argument("--no-process", action="store_true", help="grab only; run `python -m harvestradar.process` later")
     sub.add_parser("stop")
     sub.add_parser("resume")
     args = ap.parse_args()
@@ -122,7 +122,7 @@ def main() -> None:
     if args.cmd == "stop":
         stop_file.parent.mkdir(parents=True, exist_ok=True)
         stop_file.write_text(HAND_STOP + "\n")
-        return print("已停止：正在跑的会在几秒内停下。下次 run 会自动清掉这个停止标记。")
+        return print("已停止：正在抓的会在几秒内停下。下次 run 会自动清掉这个停止标记。")
     if args.cmd == "resume":
         if stop_file.exists():
             print("删除 STOP，原因是：", stop_file.read_text().strip())
@@ -137,46 +137,49 @@ def main() -> None:
         return cmd_check(cfg, mac)
 
     col = Collector(cfg, mac)
-    if args.cmd == "run":
-        # A stop by hand only ends that run; a kill switch needs `resume` after a human looked.
+    if args.cmd in ("run", "once"):
+        # A stop by hand only ends that grab; a kill switch needs `resume` after a human looked.
         if stop_file.exists() and stop_file.read_text().startswith(HAND_STOP):
             stop_file.unlink()
         if stop_file.exists():
             sys.exit(f"急停标记还在：{stop_file.read_text().strip()}\n看过聊天软件没问题后运行 resume 再 run。")
-        if args.every:
-            lo, _, hi = args.every.partition("-")
-            cfg.interval_minutes = (float(lo), float(hi or lo))
-        hours = cfg.run_hours if args.hours is None else args.hours
         if not (mac.has_screen_recording() and mac.has_accessibility()):
             mac.request_permissions()
             sys.exit("没有「屏幕录制」或「辅助功能」权限，先跑 doctor 看怎么开。")
         import subprocess
-        # Keep the Mac and its display awake while we run (screenshots of a dark
-        # screen have no text); -w ends it when this process ends.
+        # Keep the display awake while we grab (screenshots of a dark screen have
+        # no text); -w ends it when this process ends.
         subprocess.Popen(["caffeinate", "-dims", "-w", str(os.getpid())])
-        lo, hi = cfg.interval_minutes
-        print(f"开始：每 {lo:g}–{hi:g} 分钟一轮，" + (f"{hours:g} 小时后自己停。" if hours else "直到运行 stop。")
-              + "\n停止：另开终端运行 stop，或在这里按 Ctrl+C，或把鼠标甩到屏幕角上。", flush=True)
-        try:
-            return col.run(hours)
-        except KeyboardInterrupt:
-            col.log("stopped", reason="Ctrl+C")
-            return print("\n已停止。")
+        print(f"开始抓取 {len(cfg.groups)} 个群，只抓这一遍。\n请把手从鼠标键盘上拿开，"
+              f"{cfg.hands_off_seconds:g} 秒没人碰就开始（最多等 {cfg.start_wait_minutes:g} 分钟）。"
+              "\n停止：另开终端运行 stop，或在这里按 Ctrl+C，或把鼠标甩到屏幕角上。", flush=True)
     try:
         if args.cmd == "scan-current":
             mac.activate()
             results = [col.scan_group(args.group)]
         else:
-            results = col.round()
+            results = col.grab()
     except (KillSwitch, FailSafe) as e:
         col.kill(str(e))
         sys.exit(f"急停：{e}\n看过没问题后运行 resume 再继续。")
     except HumanActive as e:
-        sys.exit(f"有人在用这台 Mac（{e}），这一轮放弃。")
+        sys.exit(f"有人在用这台 Mac（{e}），这次没抓。没人用的时候再 run 一次。")
     except Stopped:
         sys.exit("已按 stop 停下。")
+    except KeyboardInterrupt:
+        col.log("stopped", reason="Ctrl+C")
+        sys.exit("\n已停止。")
     for r in results:
         print(json.dumps({"group": r.group, "screens": len(r.screens), "stop": r.stop, "newest": r.newest}, ensure_ascii=False))
+    shots = sum(len(r.screens) for r in results)
+    col.log("finished", groups=len(results), screens=shots)
+    mac.notify("HarvestRadar 抓完了", f"{len(results)} 个群，{shots} 屏截图")
+
+    if args.cmd == "run" and not args.no_process:
+        print("\n把截图变成线索：", flush=True)
+        from harvestradar import process
+        sys.argv = ["process", "--out-dir", cfg.out_dir] + (["--model", args.model] if args.model else [])
+        process.main()
 
 
 if __name__ == "__main__":

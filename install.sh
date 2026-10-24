@@ -45,8 +45,7 @@ cat <<MSG
 装好了。它不会自己启动，要跑的时候在终端里：
   cd $REPO
   .venv/bin/python -m harvestradar.collector doctor              # 先查权限（不动鼠标键盘）
-  .venv/bin/python -m harvestradar.collector run --hours 3       # 跑 3 小时后自己停；不写 --hours 就一直跑
-  .venv/bin/python -m harvestradar.collector run --every 20-40   # 每 20–40 分钟一轮
+  .venv/bin/python -m harvestradar.collector run                 # 抓一遍，再把截图变成线索；不会重复跑
   .venv/bin/python -m harvestradar.collector stop                # 另开终端停掉
 
 第一次要给「终端」开两个权限（每台 Mac 一次）：
