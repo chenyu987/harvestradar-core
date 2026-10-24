@@ -30,6 +30,7 @@ Output, per round, under <out_dir>/inbox/<date>/:
     manifest.jsonl              one line per screenshot: group, dividers seen, OCR text
 """
 
+import difflib
 import hashlib
 import json
 import random
@@ -77,7 +78,7 @@ class Config:
     hands_off_seconds: float = 10  # start only after this long with nobody touching the Mac
     start_wait_minutes: float = 10  # give up if nobody steps away within this long
     sidebar_pages: int = 5  # screens of the chat list to look through; quieter groups wait for next round
-    sidebar_scroll_clicks: int = 10  # wheel clicks per chat-list screen; a little overlap is fine
+    sidebar_scroll_clicks: int = 30  # starting value; adjusted from how many rows each scroll moved
     auto_layout: bool = True  # measure the window layout from each screenshot; [layout] is the fallback
     out_dir: str = "data/collector"
     layout: Layout = field(default_factory=Layout)
@@ -147,6 +148,7 @@ class Collector:
         self.layout = cfg.layout
         self.drafts: dict[str, bool] = {}  # chat name -> showed "[Draft]" when last seen
         self.round_started = time.monotonic()
+        self.sidebar_clicks = cfg.sidebar_scroll_clicks
 
     # ---------- files ----------
 
@@ -317,9 +319,13 @@ class Collector:
         self.look("sidebar_top")  # measures the layout before the first scroll
         self.mac.scroll_sidebar(win, self.cfg.sidebar_pages * self.cfg.sidebar_scroll_clicks * 2)  # to the top
         self.sleep(1.0)
-        page, prev_key = 0, None
+        page, prev_key, before_scroll = 0, None, None
         while todo and page < self.cfg.sidebar_pages:
             win, _, lines = self.look(f"sidebar{page:02d}")
+            names = [r.name.text for r in sidebar_rows(lines, self.layout, win)]
+            if before_scroll:
+                self.tune_sidebar_scroll(before_scroll, names)
+                before_scroll = None
             picked = None
             for g in sorted(todo, key=lambda _: self.rand.random()):
                 hits = find_sidebar_rows(lines, g, self.layout, win)
@@ -344,12 +350,36 @@ class Collector:
             prev_key = key
             page += 1
             if page < self.cfg.sidebar_pages:
-                self.mac.scroll_sidebar(win, -self.cfg.sidebar_scroll_clicks)
+                before_scroll = names
+                self.mac.scroll_sidebar(win, -self.sidebar_clicks)
                 self.sleep(self.rand.uniform(*self.cfg.pause_seconds))
         for g in sorted(todo):
             self.log("not_in_recent", group=g, pages=page,
                      note="not near the top of the chat list, so no new messages; next round")
         return results
+
+    def tune_sidebar_scroll(self, before: list[str], after: list[str]) -> None:
+        """Aim for one chat-list screen per scroll, keeping two rows of overlap.
+        How far a wheel click moves differs between Macs, so measure it: find the
+        new top row among the rows seen before the scroll."""
+        if not before or not after:
+            return
+        sim = lambda a, b: difflib.SequenceMatcher(None, normalize(a), normalize(b)).ratio()  # OCR wobbles
+        # Line the two lists up at each possible shift; the right one matches row after row.
+        fits = {k: sum(sim(x, y) for x, y in zip(before[k:], after)) / min(len(before) - k, len(after))
+                for k in range(len(before))}
+        k, fit = max(fits.items(), key=lambda kv: kv[1])
+        moved = k if fit >= 0.8 else None
+        old = self.sidebar_clicks
+        if moved is None:
+            # Nothing in common: rows may have been skipped. Scroll less from here.
+            self.sidebar_clicks = max(3, int(old * 0.6))
+            self.log("sidebar_no_overlap", clicks=old, note="may have skipped chats; scrolling less from here")
+        elif moved > 0:
+            want = max(1, len(before) - 2)
+            self.sidebar_clicks = max(3, min(300, round(old * want / moved)))
+        if self.sidebar_clicks != old:
+            self.log("sidebar_scroll", clicks=self.sidebar_clicks, moved_rows=moved, rows=len(before))
 
     def grab(self) -> list[GroupResult]:
         """One item over the groups, started by hand. Waits until nobody has
