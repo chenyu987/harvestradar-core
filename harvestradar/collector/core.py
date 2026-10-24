@@ -71,6 +71,7 @@ class HumanActive(Exception):
 class Config:
     groups: list[str] = field(default_factory=list)
     max_screens: int = 15
+    lookback_max_screens: int = 80  # per-group cap when `run --days N` reaches back past the bookmark
     first_run_days: int = 3
     scroll_clicks: int = 30  # starting value; adjusted per group from how much screens overlap
     pause_seconds: tuple[float, float] = (1.5, 4.0)  # between scrolls
@@ -149,6 +150,7 @@ class Collector:
         self.drafts: dict[str, bool] = {}  # chat name -> showed "[Draft]" when last seen
         self.round_started = time.monotonic()
         self.sidebar_clicks = cfg.sidebar_scroll_clicks
+        self.lookback_days: float | None = None  # set by `run --days N`: go back N days, ignore bookmarks
 
     # ---------- files ----------
 
@@ -231,7 +233,12 @@ class Collector:
         """Scan the chat that is open now. It must be `group` (checked on every screen)."""
         now = self.now()
         st = self.state.get(group, {})
-        checkpoint = datetime.fromisoformat(st["checkpoint"]) if "checkpoint" in st else now - timedelta(days=self.cfg.first_run_days)
+        bookmark = datetime.fromisoformat(st["checkpoint"]) if "checkpoint" in st else None
+        if self.lookback_days:
+            checkpoint = now - timedelta(days=self.lookback_days)
+        else:
+            checkpoint = bookmark or now - timedelta(days=self.cfg.first_run_days)
+        max_screens = self.cfg.lookback_max_screens if self.lookback_days else self.cfg.max_screens
 
         day_dir = self.out / "inbox" / now.strftime("%Y%m%d")
         day_dir.mkdir(parents=True, exist_ok=True)
@@ -243,12 +250,12 @@ class Collector:
         clicks = self.cfg.scroll_clicks
         stop = "max_screens"
 
-        for i in range(self.cfg.max_screens):
+        for i in range(max_screens):
             win, full, lines = self.look(f"screen{i:02d}")
             self.check_title(win, lines, group)  # every screen, in case something switched chats
             pane = [l for l in lines if inside(l, self.layout.chat_pane(win))]
             key = text_key(pane)
-            if i == 0 and key == st.get("first_key"):
+            if i == 0 and key == st.get("first_key") and not self.lookback_days:
                 stop = "no_new"
                 break
             if key == prev_key:
@@ -281,7 +288,7 @@ class Collector:
             if dividers and min(dividers) <= checkpoint:
                 stop = "checkpoint"
                 break
-            if i + 1 < self.cfg.max_screens:
+            if i + 1 < max_screens:
                 self.mac.scroll_up(win, clicks)
                 self.sleep(self.rand.uniform(*self.cfg.pause_seconds))
 
@@ -292,7 +299,10 @@ class Collector:
             with open(day_dir / "manifest.jsonl", "a") as f:
                 for s in screens:
                     f.write(json.dumps({**asdict(s), "collector_version": COLLECTOR_VERSION}, ensure_ascii=False) + "\n")
-            self.state[group] = {"checkpoint": (newest or checkpoint).isoformat(), "first_key": first_key}
+            # A look further back never moves the bookmark back: it stays at the newest message seen.
+            fallback = now - timedelta(days=self.cfg.first_run_days) if self.lookback_days else checkpoint
+            mark = max(d for d in (bookmark, newest or fallback) if d)
+            self.state[group] = {"checkpoint": mark.isoformat(), "first_key": first_key}
             self.save_state()
         self.log("group_done", group=group, screens=len(screens), stop=stop, last_clicks=clicks,
                  newest=newest.isoformat() if newest else None)
@@ -381,11 +391,13 @@ class Collector:
         if self.sidebar_clicks != old:
             self.log("sidebar_scroll", clicks=self.sidebar_clicks, moved_rows=moved, rows=len(before))
 
-    def grab(self) -> list[GroupResult]:
+    def grab(self, days: float | None = None) -> list[GroupResult]:
         """One item over the groups, started by hand. Waits until nobody has
         touched the Mac for `hands_off_seconds` (checked every 2 s, for up to
-        `start_wait_minutes`), then runs a single round."""
-        self.log("start", groups=self.cfg.groups, version=COLLECTOR_VERSION)
+        `start_wait_minutes`), then runs a single round. `days` scrolls each group
+        back that many days this time, past its bookmark."""
+        self.lookback_days = days
+        self.log("start", groups=self.cfg.groups, days=days, version=COLLECTOR_VERSION)
         for _ in range(int(self.cfg.start_wait_minutes * 30) + 1):
             if self.stop_file.exists():
                 if self.stop_file.read_text().startswith(HAND_STOP):

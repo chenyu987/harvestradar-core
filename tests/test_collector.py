@@ -182,6 +182,19 @@ class CollectorTest(unittest.TestCase):
         [r2] = self.collector(FakeMac(self.tmp, pages)).round()
         self.assertEqual((r2.stop, len(r2.screens)), ("no_new", 0))
 
+    def test_days_goes_back_past_the_bookmark(self):
+        # A quiet group: the last message is from 1/20, so the bookmark is there already.
+        pages = [["1/20 09:00", "hi"], ["1/15 10:00", "求 beta"], ["1/10 08:00", "出货"], ["1/2 08:00"]]
+        [r] = self.collector(FakeMac(self.tmp, pages)).round()
+        self.assertEqual(len(r.screens), 1)  # older than 3 days on the first screen: stop
+
+        col = self.collector(FakeMac(self.tmp, pages))
+        col.lookback_days = 14  # back to 1/14
+        [r2] = col.round()
+        self.assertEqual((r2.stop, len(r2.screens)), ("checkpoint", 3))  # 1/10 is past 1/14
+        # the bookmark stays at the newest message, not 14 days ago
+        self.assertEqual(col.state[GROUP]["checkpoint"], "2026-01-20T09:00:00")
+
     def test_finds_groups_down_the_chat_list(self):
         self.cfg.groups = [GROUP, "城西活动群", "没有新消息的群"]
         sidebar = [["工作群", "Remy"], ["城西活动群", "Lucas"], [GROUP, "闲聊群"], [GROUP, "闲聊群"]]

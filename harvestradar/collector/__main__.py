@@ -4,6 +4,7 @@
     python -m harvestradar.collector check                       # no input: screenshot, OCR, draw the measured layout
     python -m harvestradar.collector scan-current --group 群名   # scroll the chat that is already open, no click
     python -m harvestradar.collector run                         # grab every group once, then turn the screenshots into leads
+    python -m harvestradar.collector run --days 14               # this time scroll back 14 days, past the bookmarks
     python -m harvestradar.collector once                        # grab only, no processing
     python -m harvestradar.collector stop | resume               # stop a running grab / clear a kill switch
 
@@ -109,8 +110,10 @@ def main() -> None:
     sub.add_parser("check")
     sc = sub.add_parser("scan-current")
     sc.add_argument("--group", required=True, help="the chat that is open right now (checked against the title bar)")
-    sub.add_parser("once")
+    on = sub.add_parser("once")
     rn = sub.add_parser("run")
+    for p in (on, rn):
+        p.add_argument("--days", type=float, help="this time scroll each group back this many days, past where the last grab stopped")
     rn.add_argument("--model", help="cloud extractor model for the screenshots (default: process's default)")
     rn.add_argument("--no-process", action="store_true", help="grab only; run `python -m harvestradar.process` later")
     sub.add_parser("stop")
@@ -150,7 +153,8 @@ def main() -> None:
         # Keep the display awake while we grab (screenshots of a dark screen have
         # no text); -w ends it when this process ends.
         subprocess.Popen(["caffeinate", "-dims", "-w", str(os.getpid())])
-        print(f"开始抓取 {len(cfg.groups)} 个群，只抓这一遍。\n请把手从鼠标键盘上拿开，"
+        back = f"每个群往回翻 {args.days:g} 天（最多 {cfg.lookback_max_screens} 屏）" if args.days else "只看上次之后的新消息"
+        print(f"开始抓取 {len(cfg.groups)} 个群，只抓这一遍，{back}。\n请把手从鼠标键盘上拿开，"
               f"{cfg.hands_off_seconds:g} 秒没人碰就开始（最多等 {cfg.start_wait_minutes:g} 分钟）。"
               "\n停止：另开终端运行 stop，或在这里按 Ctrl+C，或把鼠标甩到屏幕角上。", flush=True)
     try:
@@ -158,7 +162,7 @@ def main() -> None:
             mac.activate()
             results = [col.scan_group(args.group)]
         else:
-            results = col.grab()
+            results = col.grab(days=args.days)
     except (KillSwitch, FailSafe) as e:
         col.kill(str(e))
         sys.exit(f"急停：{e}\n看过没问题后运行 resume 再继续。")
