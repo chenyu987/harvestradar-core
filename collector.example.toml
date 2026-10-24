@@ -6,6 +6,7 @@
 groups = ["某某活动群｜壹", "另一个活动群"]
 sidebar_pages = 5         # 左栏最多往下翻几屏找群
 max_screens = 15          # 每个群最多往上翻几屏
+lookback_max_screens = 80 # run --days N 往回翻时，每个群最多翻几屏
 first_run_days = 3        # 第一次跑往回看几天
 scroll_clicks = 30        # 每次滚轮滚几格（起始值）。两屏重叠太多会自动加大，完全不重叠会自动减小并在日志记 no_overlap
 hands_off_seconds = 10        # 敲了 run 以后，鼠标键盘没人碰满这么久才开始；中途有人动就放弃这次
