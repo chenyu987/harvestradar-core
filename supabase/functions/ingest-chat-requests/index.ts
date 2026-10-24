@@ -1,5 +1,6 @@
 // The collector Mac posts new requests (求单) here. It holds only LEADS_API_TOKEN, which
-// can add rows to public.chat_requests and nothing else: no reads, no other tables.
+// can add rows to public.chat_requests and read the names of active groups, nothing else:
+// no customers, no orders, no other tables.
 // The table lives in the admin app's database (chenyu987/admin-app, migration 0029_chat_requests).
 // Deploy with JWT verification off: the token below is the check.
 //
