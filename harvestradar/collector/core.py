@@ -19,9 +19,10 @@ with new messages moves to the top of that list, so a whitelisted group that is
 not in the first few screens of it has had no news; it is skipped this round.
 
 A kill writes the STOP file, so nothing runs again until a human deletes it.
-Someone using the Mac is not a kill: a round only starts after `idle_minutes`
-with no mouse or keyboard input and the screen unlocked, and it is dropped (and
-retried next time) as soon as the mouse moves or any key is pressed. That also
+Nothing runs on a timer: a grab happens only when a human starts it. It waits
+until nobody has touched the mouse or keyboard for `hands_off_seconds` and the
+screen is unlocked, and it is dropped as soon as the mouse moves or any key is
+pressed (start it again to retry). That also
 keeps a human's typing from ever landing in ChatApp when it comes to the front.
 
 Output, per round, under <out_dir>/inbox/<date>/:
@@ -53,6 +54,8 @@ class KillSwitch(Exception):
 
 
 HAND_STOP = "stopped by hand"  # what `stop` writes into the STOP file
+# Settings from when the collector ran on a timer; old collector.toml files may still have them.
+RETIRED_SETTINGS = {"interval_minutes", "run_hours", "active_hours", "idle_minutes"}
 
 
 class Stopped(Exception):
@@ -69,12 +72,10 @@ class Config:
     max_screens: int = 15
     first_run_days: int = 3
     scroll_clicks: int = 30  # starting value; adjusted per group from how much screens overlap
-    interval_minutes: tuple[float, float] = (30, 60)
-    run_hours: float = 0  # `run` stops by itself after this many hours; 0 = until `stop`
-    active_hours: tuple[int, int] = (9, 23)  # run only from 09:00 to 22:59
     pause_seconds: tuple[float, float] = (1.5, 4.0)  # between scrolls
     group_pause_seconds: tuple[float, float] = (20, 90)  # between groups
-    idle_minutes: float = 5  # start a round only after this long with nobody at the Mac
+    hands_off_seconds: float = 10  # start only after this long with nobody touching the Mac
+    start_wait_minutes: float = 10  # give up if nobody steps away within this long
     sidebar_pages: int = 5  # screens of the chat list to look through; quieter groups wait for next round
     sidebar_scroll_clicks: int = 10  # wheel clicks per chat-list screen; a little overlap is fine
     auto_layout: bool = True  # measure the window layout from each screenshot; [layout] is the fallback
@@ -87,6 +88,8 @@ class Config:
         c = raw.get("collector", {})
         cfg = cls(layout=Layout(**raw.get("layout", {})))
         for k, v in c.items():
+            if k in RETIRED_SETTINGS:
+                continue
             if not hasattr(cfg, k):
                 raise ValueError(f"unknown setting in {path}: {k}")
             setattr(cfg, k, tuple(v) if isinstance(getattr(cfg, k), tuple) else v)
@@ -304,7 +307,7 @@ class Collector:
         results: list[GroupResult] = []
         if self.mac.screen_locked():
             raise HumanActive("screen locked")
-        if (idle := self.mac.idle_seconds()) < self.cfg.idle_minutes * 60:
+        if (idle := self.mac.idle_seconds()) < self.cfg.hands_off_seconds:
             raise HumanActive(f"someone used the Mac {idle:.0f} s ago")
         self.round_started = time.monotonic()
         self.mac.activate()
@@ -348,35 +351,17 @@ class Collector:
                      note="not near the top of the chat list, so no new messages; next round")
         return results
 
-    def in_active_hours(self) -> bool:
-        start, end = self.cfg.active_hours
-        return start <= self.now().hour < end
-
-    def run(self, hours: float = 0) -> None:
-        """Rounds every `interval_minutes` until `hours` have passed (0 = until stopped).
-        Started by hand only; `stop` from another terminal ends it within seconds."""
-        started = time.monotonic()
-        left = lambda: hours * 3600 - (time.monotonic() - started) if hours else float("inf")
-        self.log("start", groups=self.cfg.groups, hours=hours or None, version=COLLECTOR_VERSION)
-        while left() > 0:
+    def grab(self) -> list[GroupResult]:
+        """One item over the groups, started by hand. Waits until nobody has
+        touched the Mac for `hands_off_seconds` (checked every 2 s, for up to
+        `start_wait_minutes`), then runs a single round."""
+        self.log("start", groups=self.cfg.groups, version=COLLECTOR_VERSION)
+        for _ in range(int(self.cfg.start_wait_minutes * 30) + 1):
             if self.stop_file.exists():
-                self.log("stopped", reason=self.stop_file.read_text().strip())
-                return
-            if self.in_active_hours():
-                try:
-                    self.round()
-                except HumanActive as e:
-                    self.log("paused", reason=str(e))
-                except Stopped:
-                    self.log("stopped", reason=HAND_STOP)
-                    return
-                except (FailSafe, KillSwitch) as e:
-                    self.kill(str(e))
-                    return
-            wait = min(self.rand.uniform(*self.cfg.interval_minutes) * 60, left())
-            self.log("sleep", minutes=round(wait / 60, 1))
-            end = time.monotonic() + wait
-            while time.monotonic() < end and not self.stop_file.exists():
-                self.sleep(min(10, end - time.monotonic()))
-        self.log("finished", hours=hours)
-        self.mac.notify("HarvestRadar 跑完了", f"按设定跑满 {hours:g} 小时，已停止")
+                if self.stop_file.read_text().startswith(HAND_STOP):
+                    raise Stopped(HAND_STOP)
+                raise KillSwitch("STOP file present")
+            if not self.mac.screen_locked() and self.mac.idle_seconds() >= self.cfg.hands_off_seconds:
+                return self.round()
+            self.sleep(2)
+        raise HumanActive(f"nobody stepped away from the Mac within {self.cfg.start_wait_minutes:g} min")

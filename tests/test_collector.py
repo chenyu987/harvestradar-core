@@ -7,7 +7,7 @@ from pathlib import Path
 
 from PIL import Image, ImageDraw
 
-from harvestradar.collector.core import Collector, Config, HumanActive, KillSwitch
+from harvestradar.collector.core import Collector, Config, HumanActive, KillSwitch, Stopped
 from harvestradar.collector.mac import Layout, Line, Window, detect_layout, find_sidebar_rows, sidebar_rows
 from harvestradar.collector.safety import danger_hits, title_matches
 from harvestradar.collector.timeparse import parse_divider
@@ -199,19 +199,46 @@ class CollectorTest(unittest.TestCase):
         log = (self.tmp / "out" / "log.jsonl").read_text()
         self.assertIn('"not_in_recent", "group": "没有新消息的群"', log)
 
-    def test_run_stops_on_stop_file(self):
-        mac = FakeMac(self.tmp, [["14:30"], ["13:00"]])
+    def test_grab_waits_for_hands_off_then_runs_once(self):
+        mac = FakeMac(self.tmp, [["14:30"], ["13:00"], ["Yesterday 10:02"]])
+        idle = iter([0, 4, 12])  # just pressed Enter, still near the Mac, then stepped away
+        mac.idle_seconds = lambda: next(idle, 3600)
         col = self.collector(mac)
-        col.sleep = lambda s: col.stop_file.write_text("stopped by hand\n")  # someone runs `stop` while it waits
-        col.run(hours=1)
-        log = (self.tmp / "out" / "log.jsonl").read_text()
-        self.assertIn('"stopped"', log)
-        self.assertNotIn("KILL", log)  # a stop by hand is not a kill switch
-        self.assertEqual(col.stop_file.read_text(), "stopped by hand\n")
+        waits = []
+        col.sleep = waits.append
+        results = col.grab()
+        self.assertEqual([r.group for r in results], [GROUP])
+        self.assertEqual(waits[:2], [2, 2])  # waited twice before starting
+        self.assertEqual(sum(a[0] == "click" for a in mac.actions), 1)  # one item, no repeat
+
+    def test_grab_gives_up_if_nobody_steps_away(self):
+        mac = FakeMac(self.tmp, [["14:30"]])
+        mac.idle = 1
+        self.cfg.start_wait_minutes = 1
+        col = self.collector(mac)
+        with self.assertRaises(HumanActive):
+            col.grab()
+        self.assertEqual(mac.actions, [])
+
+    def test_grab_stops_on_stop_file_while_waiting(self):
+        mac = FakeMac(self.tmp, [["14:30"]])
+        mac.idle = 1
+        col = self.collector(mac)
+        col.sleep = lambda s: col.stop_file.write_text("stopped by hand\n")  # someone runs `stop`
+        with self.assertRaises(Stopped):
+            col.grab()
+        self.assertEqual(mac.actions, [])
+        self.assertNotIn("KILL", (self.tmp / "out" / "log.jsonl").read_text())  # a stop by hand is not a kill
+
+    def test_old_timer_settings_are_ignored(self):
+        cfg_path = self.tmp / "old.toml"
+        cfg_path.write_text('[collector]\ngroups = ["a"]\ninterval_minutes = [30, 60]\nrun_hours = 3\n'
+                            'active_hours = [9, 23]\nidle_minutes = 5\n')
+        self.assertEqual(Config.load(cfg_path).groups, ["a"])
 
     def test_waits_for_nobody_at_the_mac(self):
         mac = FakeMac(self.tmp, [["14:30"]])
-        mac.idle = 30
+        mac.idle = 3
         with self.assertRaises(HumanActive):
             self.collector(mac).round()
         self.assertEqual(mac.actions, [])  # ChatApp was not even brought to the front
