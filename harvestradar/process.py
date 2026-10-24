@@ -205,6 +205,13 @@ def main() -> None:
         print(f"新求单 {t.new_leads} 条（重复的 {t.duplicates} 条没记），token {t.input_tokens}+{t.output_tokens}")
     print(f"线索在 {out / 'leads.jsonl'}，处理记录在 {out / 'processed.jsonl'}")
 
+    from harvestradar import leads_sync
+    url, token = leads_sync.settings()
+    if url and token:
+        sent, added = leads_sync.push(out, url, token)
+        if sent:
+            print(f"送到后台「求单」页：{sent} 条，新增 {added} 条")
+
 
 if __name__ == "__main__":
     main()
