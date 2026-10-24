@@ -90,7 +90,7 @@ class ProcessTest(unittest.TestCase):
 
     def test_errors_are_retried_and_stop_the_run(self):
         for n in range(5):
-            self.shot(f"a_{n:02d}.png", "求 beta")
+            self.shot(f"a_{n:02d}.png", f"求 beta 3/{n + 1}")
         cloud = FakeCloud({f"a_{n:02d}.png": RuntimeError("down") for n in range(5)})
         t = self.run_once(cloud)
         self.assertEqual((len(cloud.calls), t.errors), (3, 3))  # gives up after 3 in a row
@@ -99,9 +99,23 @@ class ProcessTest(unittest.TestCase):
         t2 = self.run_once(cloud2)
         self.assertEqual((len(cloud2.calls), t2.extracted), (5, 5))
 
+    def test_same_screen_is_sent_once(self):
+        self.shot("a_00.png", "Alex\n求一张男 beta 3/14 riverton")
+        self.shot("b_00.png", "Alex\n求一张男 beta 3/14 riverton")  # grabbed again later, nothing new
+        self.shot("c_00.png", "Alex\n求一张男 beta 3/14 riverton", group="城西活动群")  # other group: send
+        cloud = FakeCloud({"a_00.png": [REQUEST], "c_00.png": [REQUEST]})
+        t = self.run_once(cloud)
+        self.assertEqual((cloud.calls, t.same_as_sent), (["a_00.png", "c_00.png"], 1))
+
+        # a later run still knows a_00 was sent
+        self.shot("d_00.png", "Alex 求一张男 beta 3/14 riverton")  # OCR line breaks differ: still the same
+        cloud2 = FakeCloud({})
+        t2 = self.run_once(cloud2)
+        self.assertEqual((cloud2.calls, t2.same_as_sent), ([], 1))
+
     def test_daily_quota_stops_at_once(self):
         self.shot("a_00.png", "求 beta")
-        self.shot("a_01.png", "求 beta")
+        self.shot("a_01.png", "求 alpha")
         cloud = FakeCloud({"a_00.png": "daily_quota", "a_01.png": []})
         t = self.run_once(cloud)
         self.assertEqual((cloud.calls, t.errors), (["a_00.png"], 1))
