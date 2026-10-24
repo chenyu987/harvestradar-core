@@ -115,6 +115,7 @@ class FakeMac:
         self.extra = 0
         self.idle = 3600.0
         self.draft_after_click = None  # a chat that shows "[Draft]" once something was clicked
+        self.preview = lambda name: "someone: hello"  # last message under each chat name
         self.actions = []
         self.clicks = []
 
@@ -141,7 +142,7 @@ class FakeMac:
         names = self.ocr_sidebar() if self.sidebar is None else self.sidebar[min(self.list_pos, len(self.sidebar) - 1)]
         for i, name in enumerate(names):
             clicked = any(a[0] == "click" for a in self.actions)
-            preview = "[Draft] hi" if clicked and name == self.draft_after_click else "someone: hello"
+            preview = "[Draft] hi" if clicked and name == self.draft_after_click else self.preview(name)
             lines += [Line(name, 110, 90 + 60 * i, 150, 16), Line(preview, 110, 108 + 60 * i, 150, 16)]
         return lines + [Line(t, 600, 100 + 40 * i, 200, 20) for i, t in enumerate(page)]
 
@@ -178,13 +179,31 @@ class CollectorTest(unittest.TestCase):
         self.assertEqual(sum(a == ("scroll",) for a in mac.actions), 3)
         self.assertTrue(all(Path(s.file).exists() for s in r.screens))
 
-        # next round, nothing new: same first screen, so nothing is saved
+        # next round, nothing new: by default it still scrolls up min_screens (3) screens
         [r2] = self.collector(FakeMac(self.tmp, pages)).round()
-        self.assertEqual((r2.stop, len(r2.screens)), ("no_new", 0))
+        self.assertEqual((r2.stop, len(r2.screens)), ("checkpoint", 3))
+
+        # with min_screens = 1, the same first screen means nothing is saved
+        self.cfg.min_screens = 1
+        [r3] = self.collector(FakeMac(self.tmp, pages)).round()
+        self.assertEqual((r3.stop, len(r3.screens)), ("no_new", 0))
+
+    def test_always_scrolls_up_min_screens(self):
+        # A quiet group whose first screen is already older than the bookmark.
+        pages = [["1/20 09:00", "hi"], ["1/15 10:00", "求 beta"], ["1/10 08:00", "出货"], ["1/2 08:00"]]
+        mac = FakeMac(self.tmp, pages)
+        [r] = self.collector(mac).round()
+        self.assertEqual(len(r.screens), 3)
+        self.assertEqual(sum(a == ("scroll",) for a in mac.actions), 2)
+
+    def test_min_screens_stops_at_top_of_chat(self):
+        [r] = self.collector(FakeMac(self.tmp, [["1/20 09:00", "群聊开始"]])).round()
+        self.assertEqual((r.stop, len(r.screens)), ("unchanged", 1))
 
     def test_days_goes_back_past_the_bookmark(self):
         # A quiet group: the last message is from 1/20, so the bookmark is there already.
         pages = [["1/20 09:00", "hi"], ["1/15 10:00", "求 beta"], ["1/10 08:00", "出货"], ["1/2 08:00"]]
+        self.cfg.min_screens = 1
         [r] = self.collector(FakeMac(self.tmp, pages)).round()
         self.assertEqual(len(r.screens), 1)  # older than 3 days on the first screen: stop
 
@@ -210,8 +229,37 @@ class CollectorTest(unittest.TestCase):
         results = col.round()
         self.assertEqual(sorted(r.group for r in results), sorted([GROUP, "城西活动群"]))
         self.assertEqual([a[1] for a in mac.actions if a[0] == "click"], ["城西活动群", GROUP])
+        # the list ended without it: the name is wrong, or we left the group
+        self.assertEqual(col.not_found, {"没有新消息的群": "not_in_list"})
         log = (self.tmp / "out" / "log.jsonl").read_text()
-        self.assertIn('"not_in_recent", "group": "没有新消息的群"', log)
+        self.assertIn('"group_not_found", "group": "没有新消息的群"', log)
+
+    def long_list_mac(self, row):
+        """60 chats, 10 wheel clicks per row; GROUP sits at `row`."""
+        chats = [f"聊天{i:02d}" for i in range(60)]
+        chats[row] = GROUP
+        mac = FakeMac(self.tmp, [["14:30"], ["13:00"], ["Yesterday 10:02"], ["1/20 09:00"]])
+        mac.sidebar = None
+        top = [0]
+        mac.ocr_sidebar = lambda: chats[top[0]:top[0] + 12]
+        def scroll_sidebar(win, clicks):
+            mac.actions.append(("list", clicks))
+            top[0] = 0 if clicks > 0 else min(len(chats) - 12, top[0] + (-clicks) // 10)
+        mac.scroll_sidebar = scroll_sidebar
+        return mac
+
+    def test_quiet_group_far_down_is_skipped_and_reported(self):
+        self.cfg.sidebar_pages = 2
+        col = self.collector(self.long_list_mac(55))
+        self.assertEqual(col.round(), [])
+        self.assertEqual(col.not_found, {GROUP: "not_near_top"})
+
+    def test_days_searches_the_whole_list(self):
+        self.cfg.sidebar_pages = 2
+        col = self.collector(self.long_list_mac(55))
+        col.lookback_days = 14
+        self.assertEqual([r.group for r in col.round()], [GROUP])
+        self.assertEqual(col.not_found, {})
 
     def test_sidebar_scroll_learns_rows_per_click(self):
         # A long chat list where 10 wheel clicks move one row, as on the M1 Air (2026-10-24).
@@ -309,6 +357,19 @@ class CollectorTest(unittest.TestCase):
     def test_max_screens(self):
         [r] = self.collector(FakeMac(self.tmp, [["14:30"]] + [[f"{12 - i}:00"] for i in range(9)])).round()
         self.assertEqual((r.stop, len(r.screens)), ("max_screens", 5))
+
+    def test_danger_words_in_a_dm_preview_are_ignored(self):
+        mac = FakeMac(self.tmp, [["14:30"], ["13:00"], ["Yesterday 10:02"], ["1/20 09:00"]],
+                      sidebar=[["小王", GROUP]])
+        mac.preview = lambda name: "我账号功能受限了怎么办" if name == "小王" else "someone: hello"
+        [r] = self.collector(mac).round()
+        self.assertEqual(r.group, GROUP)
+
+    def test_danger_words_from_chat_team_still_kill(self):
+        mac = FakeMac(self.tmp, [["14:30"]], sidebar=[["聊天软件团队", GROUP]])
+        mac.preview = lambda name: "你的账号功能受限" if name == "聊天软件团队" else "someone: hello"
+        with self.assertRaises(KillSwitch):
+            self.collector(mac).round()
 
     def test_kill_on_danger_words(self):
         with self.assertRaises(KillSwitch):

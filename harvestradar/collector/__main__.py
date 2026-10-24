@@ -173,11 +173,21 @@ def main() -> None:
     except KeyboardInterrupt:
         col.log("stopped", reason="Ctrl+C")
         sys.exit("\n已停止。")
+    finally:
+        mac.show_terminal()  # done with ChatApp either way: show where things stand
     for r in results:
         print(json.dumps({"group": r.group, "screens": len(r.screens), "stop": r.stop, "newest": r.newest}, ensure_ascii=False))
     shots = sum(len(r.screens) for r in results)
     col.log("finished", groups=len(results), screens=shots)
     mac.notify("HarvestRadar 抓完了", f"{len(results)} 个群，{shots} 屏截图")
+    print(f"\n==== 抓完了：{len(results)} 个群，{shots} 屏截图。聊天软件可以用了。 ====", flush=True)
+    why = {"not_near_top": "左栏前几屏没有，最近没新消息，这次没看",
+           "not_in_list": "整个左栏翻到底都没有，看看 collector.toml 里的名字对不对、是不是退群或改名了",
+           "ambiguous": "左栏里有不止一个会话对得上这个名字，为安全没点，把名字写全一点"}
+    for g, reason in col.not_found.items():
+        print(f"  没抓：{g}（{why[reason]}）")
+    if "not_near_top" in col.not_found.values():
+        print("  想看这些群的老消息：run --days 14 会把左栏翻到底去找。")
 
     if args.cmd == "run" and not args.no_process:
         print("\n把截图变成线索：", flush=True)

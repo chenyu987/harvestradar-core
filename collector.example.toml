@@ -5,14 +5,16 @@
 # 有新消息的群会跑到左栏最上面，所以只在左栏前 sidebar_pages 屏里找；没找到说明没新消息，这次不看。
 groups = ["某某活动群｜壹", "另一个活动群"]
 sidebar_pages = 5         # 左栏最多往下翻几屏找群
+sidebar_max_pages = 40    # run --days N 时把左栏翻到底找群，最多几屏
 max_screens = 15          # 每个群最多往上翻几屏
+min_screens = 3           # 每个群至少往上翻几屏（就算没有新消息也翻，翻到群的最开头才停）
 lookback_max_screens = 80 # run --days N 往回翻时，每个群最多翻几屏
 first_run_days = 3        # 第一次跑往回看几天
 scroll_clicks = 30        # 每次滚轮滚几格（起始值）。两屏重叠太多会自动加大，完全不重叠会自动减小并在日志记 no_overlap
 hands_off_seconds = 10        # 敲了 run 以后，鼠标键盘没人碰满这么久才开始；中途有人动就放弃这次
 start_wait_minutes = 10       # 这么久都没等到人离开就不抓了
-pause_seconds = [1.5, 4.0]    # 每次滚动后随机停多久
-group_pause_seconds = [20, 90] # 两个群之间随机停多久
+pause_seconds = [1.0, 2.5]    # 每次滚动后随机停多久（等聊天软件加载完）
+group_pause_seconds = [3, 8]  # 两个群之间随机停多久
 out_dir = "data/collector"    # 截图、日志、状态都在这里（不进 git）
 auto_layout = true            # 每张截图自动量出左栏、标题栏、输入框的位置；量不出来才用下面的 [layout]
 
