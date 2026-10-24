@@ -138,7 +138,8 @@ class FakeMac:
     def ocr(self, path, win):
         page = self.pages[min(self.pos, len(self.pages) - 1)]
         lines = [Line(self.title, 360, 20, 300, 20)]
-        for i, name in enumerate(self.sidebar[min(self.list_pos, len(self.sidebar) - 1)]):
+        names = self.ocr_sidebar() if self.sidebar is None else self.sidebar[min(self.list_pos, len(self.sidebar) - 1)]
+        for i, name in enumerate(names):
             clicked = any(a[0] == "click" for a in self.actions)
             preview = "[Draft] hi" if clicked and name == self.draft_after_click else "someone: hello"
             lines += [Line(name, 110, 90 + 60 * i, 150, 16), Line(preview, 110, 108 + 60 * i, 150, 16)]
@@ -198,6 +199,25 @@ class CollectorTest(unittest.TestCase):
         self.assertEqual([a[1] for a in mac.actions if a[0] == "click"], ["城西活动群", GROUP])
         log = (self.tmp / "out" / "log.jsonl").read_text()
         self.assertIn('"not_in_recent", "group": "没有新消息的群"', log)
+
+    def test_sidebar_scroll_learns_rows_per_click(self):
+        # A long chat list where 10 wheel clicks move one row, as on the M1 Air (2026-10-24).
+        chats = [f"聊天{i:02d}" for i in range(60)]
+        chats[40] = GROUP
+        mac = FakeMac(self.tmp, [["14:30"], ["13:00"]])
+        mac.sidebar = None
+        top = [0]
+        mac.ocr_sidebar = lambda: chats[top[0]:top[0] + 12]
+        def scroll_sidebar(win, clicks):
+            mac.actions.append(("list", clicks))
+            top[0] = 0 if clicks > 0 else min(len(chats) - 12, top[0] + (-clicks) // 10)
+        mac.scroll_sidebar = scroll_sidebar
+        col = self.collector(mac)
+        results = col.round()
+        self.assertEqual([r.group for r in results], [GROUP])  # row 41 found within 5 screens
+        steps = [-a[1] for a in mac.actions if a[0] == "list" and a[1] < 0]
+        self.assertEqual(steps[0], 30)
+        self.assertEqual(steps[1], 100)  # moved 3 rows for 30 clicks; wants 10 rows per screen
 
     def test_grab_waits_for_hands_off_then_runs_once(self):
         mac = FakeMac(self.tmp, [["14:30"], ["13:00"], ["Yesterday 10:02"]])
