@@ -56,6 +56,8 @@ class KillSwitch(Exception):
 
 HAND_STOP = "stopped by hand"  # what `stop` writes into the STOP file
 # Settings from when the collector ran on a timer; old collector.toml files may still have them.
+# Chats ChatApp itself writes in: their previews in the chat list are still checked for danger words.
+SYSTEM_CHATS = {"聊天软件团队", "chatteam", "聊天软件安全中心", "chatsecurity", "服务通知", "servicenotifications"}
 RETIRED_SETTINGS = {"interval_minutes", "run_hours", "active_hours", "idle_minutes"}
 
 
@@ -71,11 +73,12 @@ class HumanActive(Exception):
 class Config:
     groups: list[str] = field(default_factory=list)
     max_screens: int = 15
+    min_screens: int = 3  # always scroll up at least this far, even when nothing is new
     lookback_max_screens: int = 80  # per-group cap when `run --days N` reaches back past the bookmark
     first_run_days: int = 3
     scroll_clicks: int = 30  # starting value; adjusted per group from how much screens overlap
-    pause_seconds: tuple[float, float] = (1.5, 4.0)  # between scrolls
-    group_pause_seconds: tuple[float, float] = (20, 90)  # between groups
+    pause_seconds: tuple[float, float] = (1.0, 2.5)  # between scrolls; lets ChatApp finish drawing
+    group_pause_seconds: tuple[float, float] = (3, 8)  # between groups; 30+ groups should take minutes, not half an hour
     hands_off_seconds: float = 10  # start only after this long with nobody touching the Mac
     start_wait_minutes: float = 10  # give up if nobody steps away within this long
     sidebar_pages: int = 5  # screens of the chat list to look through; quieter groups wait for next round
@@ -204,7 +207,11 @@ class Collector:
         lines = self.mac.ocr(full, win)
         if not lines:
             raise KillSwitch("OCR found no text: Screen Recording permission missing, or the screen is locked")
-        if hits := danger_hits([l.text for l in lines], ignore=self.cfg.groups):
+        # Other people's last messages in the chat list (a DM saying "我号被限制了") are not
+        # ChatApp talking to us; only system chats' previews count there.
+        chatter = {id(r.preview) for r in sidebar_rows(lines, self.layout, win)
+                   if r.preview is not None and normalize(r.name.text) not in SYSTEM_CHATS}
+        if hits := danger_hits([l.text for l in lines if id(l) not in chatter], ignore=self.cfg.groups):
             raise KillSwitch(f"danger words on screen: {', '.join(sorted(set(hits)))}")
         self.check_drafts(win, lines)
         return win, full, lines
@@ -255,7 +262,7 @@ class Collector:
             self.check_title(win, lines, group)  # every screen, in case something switched chats
             pane = [l for l in lines if inside(l, self.layout.chat_pane(win))]
             key = text_key(pane)
-            if i == 0 and key == st.get("first_key") and not self.lookback_days:
+            if i == 0 and key == st.get("first_key") and not self.lookback_days and self.cfg.min_screens <= 1:
                 stop = "no_new"
                 break
             if key == prev_key:
@@ -285,7 +292,7 @@ class Collector:
                 newest = max(dividers)  # screens go newest to oldest, so the first divider seen wins
             screens.append(ScreenInfo(str(dest), group, i, now.isoformat(timespec="seconds"),
                                       [d.isoformat() for d in dividers], "\n".join(l.text for l in pane)))
-            if dividers and min(dividers) <= checkpoint:
+            if dividers and min(dividers) <= checkpoint and i + 1 >= self.cfg.min_screens:
                 stop = "checkpoint"
                 break
             if i + 1 < max_screens:

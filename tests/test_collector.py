@@ -115,6 +115,7 @@ class FakeMac:
         self.extra = 0
         self.idle = 3600.0
         self.draft_after_click = None  # a chat that shows "[Draft]" once something was clicked
+        self.preview = lambda name: "someone: hello"  # last message under each chat name
         self.actions = []
         self.clicks = []
 
@@ -141,7 +142,7 @@ class FakeMac:
         names = self.ocr_sidebar() if self.sidebar is None else self.sidebar[min(self.list_pos, len(self.sidebar) - 1)]
         for i, name in enumerate(names):
             clicked = any(a[0] == "click" for a in self.actions)
-            preview = "[Draft] hi" if clicked and name == self.draft_after_click else "someone: hello"
+            preview = "[Draft] hi" if clicked and name == self.draft_after_click else self.preview(name)
             lines += [Line(name, 110, 90 + 60 * i, 150, 16), Line(preview, 110, 108 + 60 * i, 150, 16)]
         return lines + [Line(t, 600, 100 + 40 * i, 200, 20) for i, t in enumerate(page)]
 
@@ -178,13 +179,31 @@ class CollectorTest(unittest.TestCase):
         self.assertEqual(sum(a == ("scroll",) for a in mac.actions), 3)
         self.assertTrue(all(Path(s.file).exists() for s in r.screens))
 
-        # next round, nothing new: same first screen, so nothing is saved
+        # next round, nothing new: by default it still scrolls up min_screens (3) screens
         [r2] = self.collector(FakeMac(self.tmp, pages)).round()
-        self.assertEqual((r2.stop, len(r2.screens)), ("no_new", 0))
+        self.assertEqual((r2.stop, len(r2.screens)), ("checkpoint", 3))
+
+        # with min_screens = 1, the same first screen means nothing is saved
+        self.cfg.min_screens = 1
+        [r3] = self.collector(FakeMac(self.tmp, pages)).round()
+        self.assertEqual((r3.stop, len(r3.screens)), ("no_new", 0))
+
+    def test_always_scrolls_up_min_screens(self):
+        # A quiet group whose first screen is already older than the bookmark.
+        pages = [["1/20 09:00", "hi"], ["1/15 10:00", "求 beta"], ["1/10 08:00", "出货"], ["1/2 08:00"]]
+        mac = FakeMac(self.tmp, pages)
+        [r] = self.collector(mac).round()
+        self.assertEqual(len(r.screens), 3)
+        self.assertEqual(sum(a == ("scroll",) for a in mac.actions), 2)
+
+    def test_min_screens_stops_at_top_of_chat(self):
+        [r] = self.collector(FakeMac(self.tmp, [["1/20 09:00", "群聊开始"]])).round()
+        self.assertEqual((r.stop, len(r.screens)), ("unchanged", 1))
 
     def test_days_goes_back_past_the_bookmark(self):
         # A quiet group: the last message is from 1/20, so the bookmark is there already.
         pages = [["1/20 09:00", "hi"], ["1/15 10:00", "求 beta"], ["1/10 08:00", "出货"], ["1/2 08:00"]]
+        self.cfg.min_screens = 1
         [r] = self.collector(FakeMac(self.tmp, pages)).round()
         self.assertEqual(len(r.screens), 1)  # older than 3 days on the first screen: stop
 
@@ -309,6 +328,19 @@ class CollectorTest(unittest.TestCase):
     def test_max_screens(self):
         [r] = self.collector(FakeMac(self.tmp, [["14:30"]] + [[f"{12 - i}:00"] for i in range(9)])).round()
         self.assertEqual((r.stop, len(r.screens)), ("max_screens", 5))
+
+    def test_danger_words_in_a_dm_preview_are_ignored(self):
+        mac = FakeMac(self.tmp, [["14:30"], ["13:00"], ["Yesterday 10:02"], ["1/20 09:00"]],
+                      sidebar=[["小王", GROUP]])
+        mac.preview = lambda name: "我账号功能受限了怎么办" if name == "小王" else "someone: hello"
+        [r] = self.collector(mac).round()
+        self.assertEqual(r.group, GROUP)
+
+    def test_danger_words_from_chat_team_still_kill(self):
+        mac = FakeMac(self.tmp, [["14:30"]], sidebar=[["聊天软件团队", GROUP]])
+        mac.preview = lambda name: "你的账号功能受限" if name == "聊天软件团队" else "someone: hello"
+        with self.assertRaises(KillSwitch):
+            self.collector(mac).round()
 
     def test_kill_on_danger_words(self):
         with self.assertRaises(KillSwitch):
