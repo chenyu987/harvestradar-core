@@ -14,13 +14,14 @@ Bump PREFILTER_VERSION whenever the keywords or the prompt change.
 
 import json
 import os
+import re
 import time
 from dataclasses import dataclass
 from pathlib import Path
 
 import httpx
 
-PREFILTER_VERSION = "v1"
+PREFILTER_VERSION = "v2"
 DEFAULT_LOCAL_MODEL = "qwen3:4b"
 OLLAMA_URL = os.environ.get("OLLAMA_URL", "http://localhost:11434")
 
@@ -30,6 +31,12 @@ KEYWORDS = [
     "beta", "alpha", "item", "物品", "货",
     "求", "租", "借", "rent", "borrow", "need",
 ]
+
+# A line that both asks and names an item is kept without asking the model. The model
+# misreads busy screens (offers, carpools and one English request mixed together),
+# and a lost request costs more than a cloud call.
+ASKING = re.compile(r"求|想租|想借|有没有|有沒有|looking for|need|anyone (have|has|got)|lf\b", re.I)
+ITEM_WORDS = re.compile(r"beta|alpha|item|物品", re.I)
 
 CLASSIFY_PROMPT = """\
 下面是一张群聊截图的 OCR 文字，顺序和排版可能有点乱。
@@ -52,7 +59,7 @@ CLASSIFY_SCHEMA = {
 @dataclass
 class PrefilterResult:
     keep: bool
-    stage: str  # "keywords" | "llm" | "error": which step made the call
+    stage: str  # "keywords" | "rule" | "llm" | "error": which step made the call
     reason: str
     ocr_text: str
     ocr_seconds: float
@@ -74,6 +81,11 @@ def ocr(path: str | Path) -> str:
 def keyword_hit(text: str) -> bool:
     t = text.lower()
     return any(k in t for k in KEYWORDS)
+
+
+def sure_request(text: str) -> str:
+    """The first OCR line that asks for an item, or ""."""
+    return next((l for l in text.splitlines() if ASKING.search(l) and ITEM_WORDS.search(l)), "")
 
 
 def classify(text: str, model: str = DEFAULT_LOCAL_MODEL, client: httpx.Client | None = None) -> tuple[bool, str, int, int]:
@@ -112,6 +124,8 @@ def prefilter(path: str | Path, model: str = DEFAULT_LOCAL_MODEL, use_llm: bool 
 
     if not keyword_hit(text):
         return PrefilterResult(False, "keywords", "no item keywords", text, ocr_seconds)
+    if line := sure_request(text):
+        return PrefilterResult(True, "rule", f"asks for an item: {line[:60]}", text, ocr_seconds)
     if not use_llm:
         return PrefilterResult(True, "keywords", "keyword hit", text, ocr_seconds)
 
