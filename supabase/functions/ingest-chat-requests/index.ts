@@ -1,18 +1,23 @@
 // The collector Mac posts new requests (求单) here. It holds only LEADS_API_TOKEN, which
-// can add rows to public.chat_requests and nothing else: no reads, no other tables.
+// can add rows to public.chat_requests and read the names of active groups, nothing else:
+// no customers, no orders, no other tables.
 // The table lives in the admin app's database (chenyu987/admin-app, migration 0029_chat_requests).
 // Deploy with JWT verification off: the token below is the check.
 //
-// POST {"requests": [{dedup_key, group_name, sender, ...}]}
-// header x-ingest-token: <LEADS_API_TOKEN>
-// -> {"received": n, "inserted": m}   (rows already there are skipped by dedup_key)
+// header x-ingest-token: <LEADS_API_TOKEN> on every call.
+//
+// GET  -> {"groups": [{id, name}]}   the groups to grab: chat_groups where active (admin-app 0030).
+//         Only id and name of active groups; nothing else in the database is readable.
+// POST {"requests": [{dedup_key, group_name, group_id?, sender, ...}]}
+//      -> {"received": n, "inserted": m}   (rows already there are skipped by dedup_key)
 
 import { createClient } from "jsr:@supabase/supabase-js@2";
 
 const FIELDS = [
   "dedup_key", "group_name", "sender", "item_type", "location", "dates", "male", "female",
-  "quote", "sent_at", "extractor_note", "captured_at", "screenshot", "model", "prompt_version",
+  "quote", "sent_at", "extractor_note", "captured_at", "screenshot", "model", "prompt_version", "group_id",
 ] as const;
+const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const MAX_ROWS = 200;
 
 function json(body: unknown, status = 200) {
@@ -27,9 +32,16 @@ function sameToken(a: string, b: string) {
 }
 
 Deno.serve(async (req) => {
-  if (req.method !== "POST") return json({ error: "POST only" }, 405);
+  if (req.method !== "POST" && req.method !== "GET") return json({ error: "GET or POST only" }, 405);
   const token = Deno.env.get("LEADS_API_TOKEN") ?? "";
   if (!sameToken(req.headers.get("x-ingest-token") ?? "", token)) return json({ error: "bad token" }, 401);
+  const db = createClient(Deno.env.get("SUPABASE_URL")!, Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!);
+
+  if (req.method === "GET") {
+    const { data, error } = await db.from("chat_groups").select("id, name").eq("active", true).order("created_at");
+    if (error) return json({ error: error.message }, 500);
+    return json({ groups: data ?? [] });
+  }
 
   let body: { requests?: Record<string, unknown>[] };
   try {
@@ -46,8 +58,9 @@ Deno.serve(async (req) => {
   if (rows.some((r) => !r.dedup_key || !r.group_name || !r.sender || !r.quote)) {
     return json({ error: "each request needs dedup_key, group_name, sender, quote" }, 400);
   }
-
-  const db = createClient(Deno.env.get("SUPABASE_URL")!, Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!);
+  if (rows.some((r) => r.group_id != null && !UUID.test(String(r.group_id)))) {
+    return json({ error: "group_id must be a uuid" }, 400);
+  }
   const { data, error } = await db.from("chat_requests")
     .upsert(rows, { onConflict: "dedup_key", ignoreDuplicates: true })
     .select("id");

@@ -21,6 +21,7 @@ from pathlib import Path
 
 import httpx
 
+from harvestradar.groups import ids_by_name
 from harvestradar.process import lead_key, read_jsonl
 
 BATCH = 100
@@ -51,9 +52,10 @@ def local_iso(naive: str | None) -> str | None:
         return None
 
 
-def to_row(lead: dict) -> dict:
+def to_row(lead: dict, group_ids: dict[str, str] | None = None) -> dict:
     count = lambda v: v if isinstance(v, int) and v >= 0 else 0
     return {
+        "group_id": (group_ids or {}).get(lead.get("group", "")),
         "dedup_key": dedup_key(lead),
         "group_name": lead.get("group", ""),
         "sender": lead.get("sender", ""),
@@ -76,7 +78,8 @@ def push(out_dir: Path, url: str, token: str, client: httpx.Client | None = None
     """Send leads not sent yet. Returns (sent, newly added on the server)."""
     synced_path = out_dir / "leads_synced.txt"
     synced = set(synced_path.read_text().split()) if synced_path.exists() else set()
-    rows = [r for r in map(to_row, read_jsonl(out_dir / "leads.jsonl"))
+    ids = ids_by_name(out_dir)
+    rows = [r for r in (to_row(l, ids) for l in read_jsonl(out_dir / "leads.jsonl"))
             if r["dedup_key"] not in synced and r["sender"] and r["quote"]]
     if not rows:
         return 0, 0

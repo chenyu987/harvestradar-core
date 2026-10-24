@@ -71,7 +71,7 @@ class HumanActive(Exception):
 
 @dataclass
 class Config:
-    groups: list[str] = field(default_factory=list)
+    groups: list[str] = field(default_factory=list)  # only used when the admin app's group list can't be had
     max_screens: int = 15
     min_screens: int = 3  # always scroll up at least this far, even when nothing is new
     lookback_max_screens: int = 80  # per-group cap when `run --days N` reaches back past the bookmark
@@ -99,8 +99,6 @@ class Config:
             if not hasattr(cfg, k):
                 raise ValueError(f"unknown setting in {path}: {k}")
             setattr(cfg, k, tuple(v) if isinstance(getattr(cfg, k), tuple) else v)
-        if not cfg.groups:
-            raise ValueError(f"{path}: list at least one group under [collector] groups")
         return cfg
 
 
