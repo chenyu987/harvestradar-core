@@ -15,7 +15,7 @@ import { createClient } from "jsr:@supabase/supabase-js@2";
 
 const FIELDS = [
   "dedup_key", "group_name", "sender", "item_type", "location", "dates", "male", "female",
-  "quote", "sent_at", "extractor_note", "captured_at", "screenshot", "model", "prompt_version", "group_id",
+  "quote", "sent_at", "sent_time", "extractor_note", "captured_at", "screenshot", "model", "prompt_version", "group_id",
 ] as const;
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const MAX_ROWS = 200;
