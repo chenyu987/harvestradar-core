@@ -123,7 +123,10 @@ def main() -> None:
 
     data = Path(args.data)
     labels = [json.loads(l) for l in (data / "labels.jsonl").read_text().splitlines() if l.strip()]
-    if args.model.startswith("gemini"):
+    if args.model.startswith("qwen"):
+        client = None
+        args.workers = 1  # one local model, one Mac: running two at once only thrashes memory
+    elif args.model.startswith("gemini"):
         from google import genai
         client = genai.Client()
         args.workers = 1  # free-tier rate limits

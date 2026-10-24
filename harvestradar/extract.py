@@ -35,7 +35,11 @@ def _image_block(path: Path) -> dict:
 
 
 def extract_leads(image_path: str | Path, model: str = DEFAULT_MODEL, client=None) -> ExtractResult:
-    """Route by model name: "gemini-*" goes to Google, everything else to Claude."""
+    """Route by model name: "gemini-*" goes to Google, "qwen*" to the local Ollama
+    (OCR text only, no image), everything else to Claude."""
+    if model.startswith("qwen"):
+        from .local_extract import extract_leads_local
+        return extract_leads_local(Path(image_path), model)
     if model.startswith("gemini"):
         from .gemini import extract_leads_gemini
         return extract_leads_gemini(Path(image_path), model, client)
