@@ -20,6 +20,7 @@ Recording (or screenshots come back without ChatApp in them) and Accessibility
 doctor` checks both.
 """
 
+import os
 import subprocess
 import time
 from dataclasses import dataclass
@@ -372,6 +373,12 @@ class MacBackend:
         self._move(win.x + (x0 + x1) / 2, win.y + (y0 + y1) / 2)
         self._scroll(clicks)
         self._remember_mouse()
+
+    def show_terminal(self) -> None:
+        """Bring the terminal this was started from to the front, so whoever comes
+        back to the Mac sees the grab is over (and ChatApp is no longer driven)."""
+        app = {"iTerm.app": "iTerm"}.get(os.environ.get("TERM_PROGRAM", ""), "Terminal")
+        subprocess.run(["osascript", "-e", f'tell application {applescript_str(app)} to activate'], check=False)
 
     def notify(self, title: str, message: str) -> None:
         script = f'display notification {applescript_str(message)} with title {applescript_str(title)} sound name "Basso"'

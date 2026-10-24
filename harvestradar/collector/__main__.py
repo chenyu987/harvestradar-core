@@ -173,11 +173,14 @@ def main() -> None:
     except KeyboardInterrupt:
         col.log("stopped", reason="Ctrl+C")
         sys.exit("\n已停止。")
+    finally:
+        mac.show_terminal()  # done with ChatApp either way: show where things stand
     for r in results:
         print(json.dumps({"group": r.group, "screens": len(r.screens), "stop": r.stop, "newest": r.newest}, ensure_ascii=False))
     shots = sum(len(r.screens) for r in results)
     col.log("finished", groups=len(results), screens=shots)
     mac.notify("HarvestRadar 抓完了", f"{len(results)} 个群，{shots} 屏截图")
+    print(f"\n==== 抓完了：{len(results)} 个群，{shots} 屏截图。聊天软件可以用了。 ====", flush=True)
 
     if args.cmd == "run" and not args.no_process:
         print("\n把截图变成线索：", flush=True)
