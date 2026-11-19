@@ -1,7 +1,8 @@
 """Turn what the collector saved into leads: inbox -> prefilter -> cloud extraction -> leads.jsonl.
 
 Usage (on the Mac, after the collector has run):
-    python -m harvestradar.process                       # prefilter + gemini-3.5-flash
+    python -m harvestradar.process                       # prefilter + local qwen3:4b (default since 2026-11-19)
+    python -m harvestradar.process --model gemini-3.5-flash
     python -m harvestradar.process --model claude-haiku-5-5
     python -m harvestradar.process --no-cloud            # prefilter only; send later
 
@@ -38,7 +39,7 @@ from harvestradar.collector.safety import normalize
 from harvestradar.prefilter import DEFAULT_LOCAL_MODEL, OLLAMA_URL, PREFILTER_VERSION, prefilter
 from harvestradar.prompt import PROMPT_VERSION
 
-DEFAULT_CLOUD_MODEL = "gemini-3.5-flash"
+DEFAULT_CLOUD_MODEL = "qwen3:4b"  # 2026-11-19 用户定：不用 Gemini，本地抽取直接送后台
 DONE = {"dropped", "extracted", "same_as_sent"}
 MAX_ERRORS_IN_A_ROW = 3  # the API is down or the key is bad; stop instead of burning through the inbox
 
@@ -81,7 +82,9 @@ def ollama_up(client: httpx.Client | None = None) -> bool:
 
 
 def cloud_key_missing(model: str) -> str:
-    var = "GEMINI_API_KEY" if model.startswith("gemini") else "ANTHROPIC_API_KEY"
+    if model.startswith("qwen"):  # local Ollama, no key
+        return ""
+    var ="GEMINI_API_KEY" if model.startswith("gemini") else "ANTHROPIC_API_KEY"
     return "" if os.environ.get(var) else var
 
 
