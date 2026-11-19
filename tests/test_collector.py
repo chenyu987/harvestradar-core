@@ -73,6 +73,21 @@ class SidebarTest(unittest.TestCase):
         self.assertEqual(len(find_sidebar_rows(self.LINES, GROUP, Layout(), self.WIN)), 1)
         self.assertEqual(find_sidebar_rows(self.LINES, "城西活动群", Layout(), self.WIN), [])
 
+    def row(self, name):
+        return [Line(name, 109, 140, 120, 16), Line("someone：hi", 109, 158, 120, 16)]
+
+    def test_shorter_row_needs_dots(self):
+        # 2026-11-20: "城东 beta item2多" read as "城东 beta" got clicked for the Alpha group
+        want = "城东Beta Alpha互助群"
+        self.assertEqual(find_sidebar_rows(self.row("城东 beta"), want, Layout(), self.WIN), [])
+        self.assertEqual(len(find_sidebar_rows(self.row("城东Beta Al…"), want, Layout(), self.WIN)), 1)
+        self.assertEqual(len(find_sidebar_rows(self.row("城东Beta Al..."), want, Layout(), self.WIN)), 1)
+
+    def test_longer_row_ok(self):
+        # names in the list are written up to the first emoji
+        self.assertEqual(len(find_sidebar_rows(self.row("ABC活动群🎈🎉️2️⃣"), "ABC活动群", Layout(), self.WIN)), 1)
+        self.assertEqual(len(find_sidebar_rows(self.row("南村活动"), "南村活动", Layout(), self.WIN)), 1)
+
 
 class LayoutTest(unittest.TestCase):
     def test_detects_dividers(self):

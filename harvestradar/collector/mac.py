@@ -23,6 +23,7 @@ doctor` checks both.
 import os
 import subprocess
 import time
+import unicodedata
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -200,16 +201,21 @@ def sidebar_rows(lines: list[Line], layout: Layout, win: Window) -> list[Sidebar
 def find_sidebar_rows(lines: list[Line], group: str, layout: Layout, win: Window) -> list[Line]:
     """Names in the chat list that match this group.
 
-    ChatApp cuts long names with "...", so either name may be a prefix of the
-    other, with at least 4 characters in common. Only row names count, never the
-    last-message line under them. More than one match means the name is
-    ambiguous: the caller must not click.
+    The row may be longer than the configured name (the list holds only the part
+    before an emoji, e.g. "ABC活动群" for "ABC活动群🎈2️⃣"). The row may be shorter
+    only when ChatApp cut it with "...": a shorter row without the dots is another
+    group. 2026-11-20 "城东 beta" (OCR stopped at an emoji in "城东 beta item2多")
+    matched "城东Beta Alpha互助群", got clicked, and the title check stopped the run.
+    At least 4 characters in common. Only row names count, never the last-message
+    line under them. More than one match means the name is ambiguous: the caller
+    must not click.
     """
     want = normalize(group)
     hits = []
     for row in sidebar_rows(lines, layout, win):
-        got = normalize(row.name.text).rstrip("…")
-        if len(got) >= 4 and (want.startswith(got) or got.startswith(want)):
+        got = normalize(row.name.text)
+        cut = unicodedata.normalize("NFKC", row.name.text).rstrip().endswith("..")  # "…" becomes "..."
+        if len(got) >= 4 and (got.startswith(want) or (cut and want.startswith(got))):
             hits.append(row.name)
     return hits
 
